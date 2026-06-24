@@ -123,12 +123,31 @@ def _copy_if_better(source: Path, destination: Path) -> None:
     """Copy source → destination only when source has content and destination does not."""
     if not source.exists() or source.resolve() == destination.resolve():
         return
-    if _mapping_file_has_content(destination) and not _mapping_file_has_content(source):
-        return
     if not _mapping_file_has_content(source):
+        return
+    if _mapping_file_has_content(destination):
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
+
+
+def _clear_generated_mapping_state() -> None:
+    for path in (
+        STAGING_DIR / "script.json",
+        STAGING_DIR / "sprites.json",
+        STAGING_DIR / "resolved_sprites.json",
+        STAGING_DIR / "geyser_mappings.json",
+        STAGING_DIR / "geyser_mappings_v2.json",
+        TARGET_DIR / "script.json",
+        TARGET_DIR / "sprites.json",
+        TARGET_DIR / "resolved_sprites.json",
+        TARGET_DIR / "geyser_mappings.json",
+    ):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
 
 
 def _sync_script_mapping_from_workspace() -> None:
@@ -161,6 +180,8 @@ def _prepare_pack_workspace() -> bool:
     if not _exists(input_pack):
         _log("WARN", f"{input_pack} not found; skipping post-processing hooks")
         return False
+
+    _clear_generated_mapping_state()
 
     if PACK_WORK_DIR.exists():
         shutil.rmtree(PACK_WORK_DIR, ignore_errors=True)
@@ -660,6 +681,7 @@ def _prune_output_files() -> Dict[str, Any]:
         ".lang",
         ".material",
         ".txt",
+        ".bin",
     }
     drop_suffixes = {".psd", ".xcf", ".bbmodel", ".blend", ".tmp", ".bak", ".old", ".disabled"}
     imported_root = TARGET_RP_DIR / "imported_java"
@@ -1034,6 +1056,7 @@ def main() -> None:
         ("gui", "GUI_CONVERSION", signals.get("gui", 0) > 0),
         ("particles", "PARTICLE_CONVERSION", signals.get("particles", 0) > 0),
         ("entity", "ENTITY_CONVERSION", signals.get("entity", 0) > 0),
+        ("bedrock_post", "BEDROCK_POST", True),
     ]
 
     for module_name, env_name, auto_default in hook_specs:

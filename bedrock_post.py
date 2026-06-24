@@ -21,6 +21,127 @@ REPORT_FILE = TARGET_DIR / "reports" / "bedrock_post_report.json"
 
 TEXTURE_EXTENSIONS = (".png", ".tga", ".jpg", ".jpeg")
 ALLOWED_TEXTURE_SUFFIXES = TEXTURE_EXTENSIONS + (".mcmeta",)
+VANILLA_JAVA_ITEMS = {
+    "paper",
+    "stick",
+    "flint",
+    "bow",
+    "crossbow",
+    "shield",
+    "trident",
+    "fishing_rod",
+    "carrot_on_a_stick",
+    "warped_fungus_on_a_stick",
+    "wooden_sword",
+    "stone_sword",
+    "iron_sword",
+    "golden_sword",
+    "diamond_sword",
+    "netherite_sword",
+    "wooden_pickaxe",
+    "stone_pickaxe",
+    "iron_pickaxe",
+    "golden_pickaxe",
+    "diamond_pickaxe",
+    "netherite_pickaxe",
+    "wooden_axe",
+    "stone_axe",
+    "iron_axe",
+    "golden_axe",
+    "diamond_axe",
+    "netherite_axe",
+    "wooden_shovel",
+    "stone_shovel",
+    "iron_shovel",
+    "golden_shovel",
+    "diamond_shovel",
+    "netherite_shovel",
+    "wooden_hoe",
+    "stone_hoe",
+    "iron_hoe",
+    "golden_hoe",
+    "diamond_hoe",
+    "netherite_hoe",
+    "leather_helmet",
+    "leather_chestplate",
+    "leather_leggings",
+    "leather_boots",
+    "chainmail_helmet",
+    "chainmail_chestplate",
+    "chainmail_leggings",
+    "chainmail_boots",
+    "iron_helmet",
+    "iron_chestplate",
+    "iron_leggings",
+    "iron_boots",
+    "golden_helmet",
+    "golden_chestplate",
+    "golden_leggings",
+    "golden_boots",
+    "diamond_helmet",
+    "diamond_chestplate",
+    "diamond_leggings",
+    "diamond_boots",
+    "netherite_helmet",
+    "netherite_chestplate",
+    "netherite_leggings",
+    "netherite_boots",
+    "turtle_helmet",
+    "elytra",
+    "mace",
+    "apple",
+    "golden_apple",
+    "carrot",
+    "potato",
+    "beetroot",
+    "bread",
+    "potion",
+    "splash_potion",
+    "lingering_potion",
+    "glass_bottle",
+    "experience_bottle",
+    "bucket",
+    "water_bucket",
+    "lava_bucket",
+    "milk_bucket",
+    "snowball",
+    "egg",
+    "ender_pearl",
+    "firework_rocket",
+    "firework_star",
+    "book",
+    "writable_book",
+    "written_book",
+    "knowledge_book",
+    "map",
+    "filled_map",
+    "compass",
+    "clock",
+    "name_tag",
+    "lead",
+    "saddle",
+    "minecart",
+    "music_disc_13",
+    "music_disc_cat",
+    "music_disc_blocks",
+    "music_disc_chirp",
+    "music_disc_creator",
+    "music_disc_creator_music_box",
+    "music_disc_far",
+    "music_disc_mall",
+    "music_disc_mellohi",
+    "music_disc_stal",
+    "music_disc_strad",
+    "music_disc_ward",
+    "music_disc_11",
+    "music_disc_wait",
+    "music_disc_otherside",
+    "music_disc_relic",
+    "music_disc_5",
+    "music_disc_pigstep",
+    "music_disc_precipice",
+    "music_disc_tears",
+}
 PBR_SUFFIXES = {
     "_n": "normal",
     "_normal": "normal",
@@ -233,6 +354,53 @@ def _strip_texture_ext(value: str) -> str:
 
 def _sanitize_identifier(value: str) -> str:
     return re.sub(r"[^a-z0-9_.-]+", "_", value.lower()).strip("_") or "asset"
+
+
+def _allow_custom_java_items() -> bool:
+    return os.getenv("GEYSER_ALLOW_CUSTOM_JAVA_ITEMS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _java_item_key_parts(item_id: Any, *, allow_custom_path: bool = False) -> Optional[Tuple[str, str]]:
+    if not isinstance(item_id, str):
+        return None
+    raw = item_id.strip().replace("\\", "/").lower()
+    if not raw:
+        return None
+    if ":" in raw:
+        namespace, name = raw.split(":", 1)
+        namespace = namespace or "minecraft"
+    else:
+        namespace, name = "minecraft", raw
+    namespace = re.sub(r"[^a-z0-9_.-]+", "_", namespace).strip("_.-")
+    name = re.sub(r"[^a-z0-9_./-]+", "_", name).strip("_.-/")
+    if not namespace or not name:
+        return None
+    if "/" in name and not (allow_custom_path and namespace != "minecraft"):
+        return None
+    return namespace, name
+
+
+def _canonical_java_item_key(item_id: Any, *, allow_custom_path: bool = False) -> Optional[str]:
+    parts = _java_item_key_parts(item_id, allow_custom_path=allow_custom_path)
+    if not parts:
+        return None
+    namespace, name = parts
+    return f"{namespace}:{name}"
+
+
+def _mapping_entry_has_predicate(entry: Dict[str, Any]) -> bool:
+    return any(entry.get(key) is not None for key in ("custom_model_data", "damage_predicate", "unbreakable"))
+
+
+def _known_java_item_key(item_id: Any) -> bool:
+    allow_custom_items = _allow_custom_java_items()
+    parts = _java_item_key_parts(item_id, allow_custom_path=allow_custom_items)
+    if not parts:
+        return False
+    namespace, name = parts
+    if namespace == "minecraft":
+        return name in VANILLA_JAVA_ITEMS
+    return allow_custom_items
 
 
 def _split_ns(reference: str, default_ns: str = "minecraft") -> Tuple[str, str]:
@@ -1455,6 +1623,92 @@ def _ensure_sound_definitions() -> Dict[str, Any]:
     return {"sound_definition_entries_added": added, "sound_definition_entry_count": len(definitions)}
 
 
+def _sanitize_geyser_mappings() -> Dict[str, Any]:
+    mapping_path = TARGET_DIR / "geyser_mappings.json"
+    mapping = _load_json(mapping_path)
+    if not isinstance(mapping, dict):
+        return {"geyser_mapping_sanitized": False}
+
+    items = mapping.get("items")
+    if not isinstance(items, dict):
+        return {"geyser_mapping_sanitized": False}
+
+    clean_items: Dict[str, List[Dict[str, Any]]] = {}
+    skipped: List[Dict[str, str]] = []
+    removed_entries = 0
+    duplicate_entries = 0
+    allow_custom_registry = _allow_custom_java_items()
+
+    for raw_item_id, raw_entries in sorted(items.items()):
+        canonical_item = _canonical_java_item_key(raw_item_id, allow_custom_path=allow_custom_registry)
+        if not canonical_item or not _known_java_item_key(canonical_item):
+            entry_count = len(raw_entries) if isinstance(raw_entries, list) else 1
+            removed_entries += entry_count
+            skipped.append({"item": str(raw_item_id), "reason": "unknown_java_item"})
+            continue
+
+        entries = raw_entries if isinstance(raw_entries, list) else [raw_entries]
+        clean_entries: List[Dict[str, Any]] = []
+        seen: Set[Tuple[Any, Any, Any, Any, Any]] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                removed_entries += 1
+                skipped.append({"item": canonical_item, "reason": "invalid_entry"})
+                continue
+            if not _mapping_entry_has_predicate(entry) and not (
+                allow_custom_registry and str(entry.get("type", "")).strip().lower() == "definition"
+            ):
+                removed_entries += 1
+                skipped.append({"item": canonical_item, "reason": "missing_custom_model_predicate"})
+                continue
+
+            name = entry.get("name") or entry.get("bedrock_identifier") or entry.get("icon")
+            key = (
+                name,
+                entry.get("custom_model_data"),
+                entry.get("damage_predicate"),
+                entry.get("unbreakable"),
+                entry.get("icon"),
+            )
+            if key in seen:
+                duplicate_entries += 1
+                continue
+            seen.add(key)
+            clean_entries.append(entry)
+
+        if clean_entries:
+            clean_items.setdefault(canonical_item, []).extend(clean_entries)
+
+    mapping["items"] = clean_items
+    metadata = mapping.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        metadata["sanitized_by"] = "bedrock_post.py"
+        metadata["removed_entry_count"] = removed_entries
+        metadata["duplicate_entry_count"] = duplicate_entries
+        metadata["skipped_item_count"] = len(skipped)
+        metadata["skipped_items"] = skipped[:500]
+    _write_json(mapping_path, mapping)
+    _write_json(
+        TARGET_DIR / "reports" / "geyser_mapping_validation.json",
+        {
+            "status": "pass" if not removed_entries and not duplicate_entries else "sanitized",
+            "remaining_item_count": len(clean_items),
+            "remaining_entry_count": sum(len(value) for value in clean_items.values()),
+            "removed_entry_count": removed_entries,
+            "duplicate_entry_count": duplicate_entries,
+            "skipped_item_count": len(skipped),
+            "skipped_items": skipped[:500],
+        },
+    )
+    return {
+        "geyser_mapping_sanitized": bool(removed_entries or duplicate_entries),
+        "geyser_mapping_remaining_items": len(clean_items),
+        "geyser_mapping_remaining_entries": sum(len(value) for value in clean_items.values()),
+        "geyser_mapping_removed_entries": removed_entries,
+        "geyser_mapping_duplicate_entries": duplicate_entries,
+    }
+
+
 def _write_conversion_validation() -> Dict[str, Any]:
     missing: List[str] = []
     json_errors: List[str] = []
@@ -1548,6 +1802,7 @@ def _sanitize_output_files() -> Dict[str, Any]:
         ".lang",
         ".material",
         ".txt",
+        ".bin",
         ".ogg",
         ".wav",
         ".mp3",
@@ -1604,6 +1859,7 @@ def run() -> None:
     report.update(_write_texture_sets())
     report.update(_ensure_atlas_entries())
     report.update(_generate_custom_item_components())
+    report.update(_sanitize_geyser_mappings())
     report.update(_generate_item_components_from_mappings())
     report.update(_generate_spawn_egg_textures())
     report.update(_generate_potion_bottle_textures())

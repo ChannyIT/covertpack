@@ -5,7 +5,10 @@ on:
       - opened
       - edited
       - reopened
-      - labeled
+
+concurrency:
+  group: conversion-request-${{ github.event.issue.number }}
+  cancel-in-progress: true
 
 jobs:
   get-pack-info:

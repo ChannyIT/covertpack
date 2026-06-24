@@ -108,6 +108,17 @@ download_default_assets () {
   return 1
 }
 
+reset_converter_workspace () {
+  if [[ "${COVERPACK_CLEAN_WORKSPACE:-true}" == "false" ]]; then
+    return
+  fi
+
+  status_message process "Resetting converter workspace"
+  rm -rf ./assets ./target ./scratch_files ./providedassetholding ./defaultassetholding ./inputbedrockpack
+  rm -f ./pack.mcmeta ./pack.png ./script.json ./sprites.json ./resolved_sprites.json
+  rm -f ./geyser_mappings.json ./geyser_mappings_v2.json ./config.json ./provided_assets.zip
+}
+
 ensure_geyser_mapping_from_script () {
   local sprite_mapping_file=""
   if [[ -f "script.json" ]]; then
@@ -419,6 +430,8 @@ dependency_check "sponge" "https://joeyh.name/code/moreutils/" "-v sponge" ""
 dependency_check "imagemagick" "https://imagemagick.org/script/download.php" "convert --version" ""
 dependency_check "spritesheet-js" "https://www.npmjs.com/package/spritesheet-js" "-v spritesheet-js" ""
 status_message completion "All dependencies have been satisfied\n"
+
+reset_converter_workspace
 
 # prompt user for initial configuration (disabled in zero-touch mode)
 status_message info "Zero-touch mode enabled; using non-interactive defaults/env overrides.\n"

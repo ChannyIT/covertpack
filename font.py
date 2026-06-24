@@ -832,6 +832,42 @@ def _write_bucket_sheet(bucket: str, tiles: Dict[int, Image.Image], cell_w: int,
     sheet.save(output, "PNG")
 
 
+def _write_bedrock_glyph_sizes(glyph_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    OUTPUT_FONT_DIR.mkdir(parents=True, exist_ok=True)
+    sizes = bytearray(65536)
+    visible = 0
+
+    for glyph in glyph_map.values():
+        codepoint = _coerce_int(glyph.get("codepoint"))
+        if codepoint is None or not (0 <= codepoint <= 0xFFFF):
+            continue
+        if not glyph.get("texture"):
+            continue
+
+        width = _coerce_int(glyph.get("width"))
+        if width is None or width <= 0:
+            cell_width = _coerce_int(glyph.get("cell_width")) or 16
+            width = max(1, min(16, cell_width))
+
+        left = _coerce_int(glyph.get("left_bearing")) or 0
+        right_bearing = _coerce_int(glyph.get("right_bearing")) or 0
+        cell_width = _coerce_int(glyph.get("cell_width")) or max(width, 16)
+        right = max(left, min(15, cell_width - max(0, right_bearing) - 1))
+        left = max(0, min(15, left))
+        if right < left:
+            right = min(15, left + max(0, min(width - 1, 15 - left)))
+
+        sizes[codepoint] = ((left & 0x0F) << 4) | (right & 0x0F)
+        visible += 1
+
+    (OUTPUT_FONT_DIR / "glyph_sizes.bin").write_bytes(bytes(sizes))
+    return {
+        "bedrock_glyph_sizes_written": True,
+        "bedrock_glyph_size_bytes": len(sizes),
+        "bedrock_visible_glyph_count": visible,
+    }
+
+
 def _variant_score(variant: Dict[str, Any]) -> int:
     provider = str(variant.get("provider", "")).strip().lower()
     score = 0
@@ -1228,6 +1264,8 @@ def run() -> None:
         _log("No glyphs extracted from font providers")
         return
 
+    bedrock_font_assets = _write_bedrock_glyph_sizes(glyph_map)
+
     OUTPUT_MAPPING_FILE.parent.mkdir(parents=True, exist_ok=True)
     missing_ref_count = (
         len(missing_bitmap_textures)
@@ -1250,6 +1288,7 @@ def run() -> None:
         "glyph_count": len(glyph_map),
         "glyph_variant_count": sum(len(variants) for variants in glyph_variants.values()),
         "supplementary_glyph_count": supplementary_count,
+        **bedrock_font_assets,
         "glyph_map": glyph_map,
         "glyph_variants": glyph_variants,
         "char_to_codepoint": char_to_codepoint,
