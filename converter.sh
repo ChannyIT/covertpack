@@ -686,12 +686,56 @@ if contains(":") then sub("\\:(.+)"; "") else "minecraft" end
 | to_entries | map( ((.value.geyserID = "gmdl_\(1+.key)") | .value))
 | INDEX(.geyserID)
 
-' ./assets/minecraft/models/item/*.json > config.json || { status_message error "Invalid JSON exists in block or item folder! See above log."; exit 1; }
+' $(find ./assets -path '*/models/item/*.json' 2>/dev/null | LC_ALL=C sort) > config.json || { status_message error "Invalid JSON exists in block or item folder! See above log."; exit 1; }
 status_message completion "Initial predicate config generated"
+
+# FIX: Support 1.21.4+ item definition format (assets/*/items/*.json)
+# These use minecraft:custom_model_data component instead of overrides predicates
+item_def_files=$(find ./assets -path '*/items/*.json' 2>/dev/null | LC_ALL=C sort)
+if [[ -n "${item_def_files}" ]]; then
+  status_message process "Processing 1.21.4+ item definition files"
+  jq --slurpfile item_texture scratch_files/item_texture.json --slurpfile item_mappings scratch_files/item_mappings.json -n '
+  def maxdur($input):
+    ($item_mappings[] |
+    [to_entries | map(.key as $key | .value | .java_identifer = $key) | .[] | select(.max_damage)]
+    | map({(.java_identifer | split(":") | .[1]): (.max_damage)})
+    | add
+    | .[$input] // 1)
+  ;
+  def bedrocktexture($input):
+    ($item_texture[] | .[$input] // {"icon": "camera", "frame": 0})
+  ;
+  def namespace:
+    if contains(":") then sub("\:(.+)"; "") else "minecraft" end
+  ;
+  [inputs |
+    . as $def |
+    (input_filename | sub("(.+)/(?<item>[^/]+)\.json$"; .item)) as $item_name |
+    (input_filename | sub("(.+)/assets/(?<ns>[^/]+)/.*"; .ns)) as $item_ns |
+    ($def | .components // {} | ."minecraft:custom_model_data" // ."minecraft:item_model") |
+    if . then
+      {
+        "item": $item_name,
+        "bedrock_icon": bedrocktexture($item_name),
+        "nbt": {"CustomModelData": (if type == "object" then .strings[0] // .floats[0] else . end)},
+        "path": ("./assets/" + $item_ns + "/models/item/" + $item_name + ".json"),
+        "namespace": $item_ns,
+        "model_path": "item",
+        "model_name": $item_name,
+        "generated": false
+      }
+    else empty end
+  ] | to_entries | map(.value.geyserID = "gmdl_ext_\(1+.key)" | .value) | INDEX(.geyserID)
+  ' ${item_def_files} 2>/dev/null > scratch_files/item_defs_extra.json || true
+  if [[ -s scratch_files/item_defs_extra.json ]]; then
+    jq -s '.[0] * .[1]' config.json scratch_files/item_defs_extra.json | sponge config.json
+    status_message completion "1.21.4+ item definitions merged into config"
+  fi
+fi
 
 # get a bash array of all model json files in our resource pack
 status_message process "Generating an array of all model JSON files to crosscheck with our predicate config"
-json_dir=($(find ./assets/**/models -type f -name '*.json'))
+json_dir=($(find ./assets -path '*/models/*.json' 2>/dev/null | LC_ALL=C sort))
 
 # ensure all our reference files in config.json exist, and delete the entry if they do not
 status_message critical "Removing config entries that do not have an associated JSON file in the pack"
@@ -1711,6 +1755,9 @@ fi
 if [[ -f "resolved_sprites.json" ]]; then
   cp -f "resolved_sprites.json" "./target/resolved_sprites.json"
 fi
+
+# FIX: Clean bow/shield cache from previous runs to avoid stale data
+rm -rf cache/bow cache/shield 2>/dev/null || true
 
 run_manager_hooks "${1}"
 collect_conversion_diagnostics

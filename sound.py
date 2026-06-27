@@ -485,8 +485,23 @@ def run() -> None:
             if not converted_sounds:
                 continue
 
+            # FIX: Auto-detect category from event name if not explicitly set
+            def _infer_category(event_key: str, explicit: Any) -> str:
+                if isinstance(explicit, str) and explicit.strip():
+                    return explicit.strip()
+                key_lower = event_key.lower()
+                if any(x in key_lower for x in ("music", "record", "jukebox")):
+                    return "music"
+                if any(x in key_lower for x in ("ambient", "weather", "rain", "thunder")):
+                    return "ambient"
+                if any(x in key_lower for x in ("block.", "dig.", "step.", "place.", "break.")):
+                    return "block"
+                if any(x in key_lower for x in ("entity.", "mob.", "player.", "hostile.", "neutral.")):
+                    return "hostile" if any(x in key_lower for x in ("zombie", "spider", "creeper", "skeleton", "witch", "phantom")) else "neutral"
+                return "neutral"
+
             output["sound_definitions"][event_key] = {
-                "category": category if isinstance(category, str) else "neutral",
+                "category": _infer_category(event_key, category),
                 "sounds": converted_sounds,
             }
 

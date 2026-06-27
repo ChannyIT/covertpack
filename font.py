@@ -901,6 +901,38 @@ def _variant_score(variant: Dict[str, Any]) -> int:
     return score
 
 
+def _write_bedrock_font_definition(buckets) -> None:
+    """Write Bedrock font/default.json referencing all glyph sprite sheets."""
+    OUTPUT_FONT_DIR.mkdir(parents=True, exist_ok=True)
+    glyph_pages = {}
+    for bucket in buckets:
+        # bucket is like "00", "E0" etc. - map to int page index
+        try:
+            page_index = int(bucket, 16) if len(bucket) == 2 else int(bucket)
+        except Exception:
+            page_index = 0
+        glyph_pages[page_index] = f"textures/font/glyph_{bucket}"
+
+    data = {
+        "type": "trueTypeFont",
+        "path": "font/NotoSansUI-Regular.ttf",
+        "size": 11.0,
+        "blur": 0,
+        "shadow": False,
+        "default": {
+            "glyphPages": glyph_pages,
+            "glyphSizes": "font/glyph_sizes.bin",
+        },
+    }
+
+    # Write the Bedrock font definition
+    out_path = OUTPUT_FONT_DIR / "default.json"
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    _log(f"Wrote Bedrock font definition with {len(glyph_pages)} glyph page(s)")
+
+
 def run() -> None:
     root_fonts = list(_iter_root_font_definitions())
     if not root_fonts:
@@ -1265,6 +1297,9 @@ def run() -> None:
         return
 
     bedrock_font_assets = _write_bedrock_glyph_sizes(glyph_map)
+
+    # FIX: Write Bedrock font/default.json that references our glyph sheets
+    _write_bedrock_font_definition(sorted(bucket_tiles.keys()))
 
     OUTPUT_MAPPING_FILE.parent.mkdir(parents=True, exist_ok=True)
     missing_ref_count = (

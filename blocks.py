@@ -1,16 +1,3 @@
-"""
-blocks.py  –  Java blockstate → Bedrock block-mapping converter
-Fixed:
-  1. run(): call blocks_util.write_terrain_texture() before any block is
-     processed, so terrain_texture.json always exists when
-     create_terrain_texture() tries to open it.
-  2. run(): normalise model refs before handing to blocks_util.get_am_file()
-     – strip a stray 'minecraft:' prefix when the default namespace matches
-     so vanilla refs like 'minecraft:block/stone' are found.
-  3. _normalize_tripwire_state(): made more robust; falls back to the
-     original key when the expected number of parts isn't present.
-  4. _extract_models(): deduplicated final list now preserves order correctly.
-"""
 
 from __future__ import annotations
 
@@ -568,41 +555,6 @@ def run() -> None:
 if __name__ == "__main__":
     run()
 
-
-def _extract_models(variant: object) -> List[str]:
-    out: List[str] = []
-
-    if isinstance(variant, dict):
-        for key, value in variant.items():
-            key_lower = str(key).strip().lower()
-
-            if key_lower == "model" and isinstance(value, str) and value:
-                out.append(value)
-                continue
-
-            if key_lower == "models" and isinstance(value, list):
-                out.extend(_extract_models(value))
-                continue
-
-            if key_lower == "apply":
-                out.extend(_extract_models(value))
-                continue
-
-            if isinstance(value, (dict, list)):
-                out.extend(_extract_models(value))
-
-    if isinstance(variant, list):
-        for item in variant:
-            out.extend(_extract_models(item))
-
-    seen: Set[str] = set()
-    deduped: List[str] = []
-    for model in out:
-        if model in seen:
-            continue
-        seen.add(model)
-        deduped.append(model)
-    return deduped
 
 
 def _normalize_state_value(value: object) -> List[str]:

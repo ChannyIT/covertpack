@@ -96,6 +96,25 @@ def _iter_nodes(node: Any) -> Iterator[Dict[str, Any]]:
                     stack.append(value)
 
 
+# FIX: Detect whether a JSON file is Bedrock geometry format.
+# Java entity model files (e.g. zombie.json in models/entity/) are NOT Bedrock geo.
+# Skip them to avoid polluting the Bedrock pack with invalid files.
+def _is_bedrock_geo_format(data: Any) -> bool:
+    """Return True only if data appears to be a Bedrock geometry file."""
+    if not isinstance(data, dict):
+        return False
+    # Bedrock 1.12+ format: has "minecraft:geometry" key
+    if "minecraft:geometry" in data:
+        return True
+    # Legacy Bedrock format: top-level keys start with "geometry."
+    if any(str(k).startswith("geometry.") for k in data.keys()):
+        return True
+    # Bedrock entity definitions: has "minecraft:client_entity" or "minecraft:attachable"
+    if "minecraft:client_entity" in data or "minecraft:attachable" in data:
+        return True
+    return False
+
+
 def _extract_string_refs(data: Any, key_tokens: Iterable[str]) -> List[str]:
     refs: Set[str] = set()
     tokens = tuple(token.lower() for token in key_tokens)
@@ -104,8 +123,7 @@ def _extract_string_refs(data: Any, key_tokens: Iterable[str]) -> List[str]:
         if isinstance(value, str) and value.strip():
             raw = value.strip()
             out: Set[str] = {raw}
-
-            parts = re.split(r"[\s,;(){}\[\]<>|&]+", raw)
+            parts = re.split(r"[\s,;(){}[\]<>|&]+", raw)
             for part in parts:
                 candidate = part.strip().strip("'\"")
                 if not candidate:
@@ -113,7 +131,6 @@ def _extract_string_refs(data: Any, key_tokens: Iterable[str]) -> List[str]:
                 lowered = candidate.lower()
                 if any(token in lowered for token in tokens):
                     out.add(candidate)
-
             if len(raw) >= 3:
                 for match in re.findall(r"(?:[a-z0-9_]+:)?[a-z0-9_.\-/]+", raw, flags=re.IGNORECASE):
                     candidate = match.strip().strip("'\"")
@@ -141,7 +158,6 @@ def _extract_string_refs(data: Any, key_tokens: Iterable[str]) -> List[str]:
             key_lower = str(key).strip().lower()
             if not any(token in key_lower for token in tokens):
                 continue
-
             for ref in _collect_string_values(value):
                 refs.add(ref)
 
@@ -157,48 +173,13 @@ def _extract_named_key_refs(data: Any, container_tokens: Iterable[str]) -> List[
             key_lower = str(key).strip().lower()
             if not any(token in key_lower for token in tokens):
                 continue
-
             if isinstance(value, dict):
-                for nested_key in value.keys():
-                    nested_text = str(nested_key).strip()
-                    if nested_text:
-                        refs.add(nested_text)
-                for nested_value in value.values():
-                    if isinstance(nested_value, str) and nested_value.strip():
-                        refs.add(nested_value.strip())
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, str) and item.strip():
-                        refs.add(item.strip())
-                    elif isinstance(item, dict):
-                        for nested_key in item.keys():
-                            nested_text = str(nested_key).strip()
-                            if nested_text:
-                                refs.add(nested_text)
-                        for nested_value in item.values():
-                            if isinstance(nested_value, str) and nested_value.strip():
-                                refs.add(nested_value.strip())
-            elif isinstance(value, str) and value.strip():
-                refs.add(value.strip())
+                for sub_key in value.keys():
+                    raw = str(sub_key).strip()
+                    if raw:
+                        refs.add(raw)
+
     return sorted(refs)
-
-
-def _extract_entity_definition_refs(data: Dict[str, Any]) -> Dict[str, List[str]]:
-    return {
-        "geometry_refs": _extract_string_refs(data, ("geometry", "model")),
-        "animation_refs": _extract_string_refs(data, ("animation",)),
-        "animation_controller_refs": _extract_string_refs(data, ("controller", "animation_controller")),
-        "render_controller_refs": _extract_string_refs(data, ("render_controller", "rendercontrollers")),
-        "texture_refs": _extract_string_refs(data, ("texture", "textures")),
-        "material_refs": _extract_string_refs(data, ("material", "materials")),
-        "particle_refs": _extract_string_refs(data, ("particle",)),
-        "sound_refs": _extract_string_refs(data, ("sound", "sounds")),
-        "event_refs": _extract_named_key_refs(data, ("event", "events")),
-        "component_group_refs": _extract_named_key_refs(data, ("component_group", "component_groups")),
-        "script_refs": _extract_string_refs(data, ("script", "scripts")),
-        "loot_refs": _extract_string_refs(data, ("loot", "loot_table", "loot_tables")),
-        "spawn_rule_refs": _extract_string_refs(data, ("spawn_rule", "spawn_rules")),
-    }
 
 
 def _extract_render_controller_refs(data: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -248,17 +229,16 @@ def _extract_attachable_refs(data: Dict[str, Any]) -> Dict[str, List[str]]:
     }
 
 
-def _namespace_and_relative(path: Path, anchor: str) -> Optional[tuple[str, str]]:
+def _namespace_and_relative(path: Path, anchor: str) -> Optional[tuple]:
     parts = path.as_posix().split("/")
     try:
         assets_index = parts.index("assets")
         namespace_index = assets_index + 1
         namespace = parts[namespace_index]
         anchor_index = parts.index(anchor, namespace_index + 1)
-        rel = "/".join(parts[anchor_index + 1 :])
+        rel = "/".join(parts[anchor_index + 1:])
     except Exception:
         return None
-
     if not rel:
         return None
     return namespace, rel
@@ -274,7 +254,6 @@ def _copy_to_target(
     ns_rel = _namespace_and_relative(path, anchor)
     if not ns_rel:
         return None
-
     namespace, rel = ns_rel
     destination = TARGET_RP_DIR / root_folder / namespace / rel
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -308,7 +287,6 @@ def _all_texture_namespaces() -> List[str]:
     assets_root = PACK_DIR / "assets"
     if not assets_root.exists() or not assets_root.is_dir():
         return []
-
     namespaces: List[str] = []
     for candidate in assets_root.iterdir():
         if not candidate.is_dir():
@@ -335,9 +313,7 @@ def _looks_like_texture_ref(value: str) -> bool:
 
 def _resolve_texture_source(reference: str, default_namespace: str = "minecraft") -> Optional[Path]:
     ref = reference.strip().replace("\\", "/")
-    if not ref:
-        return None
-    if ref.startswith(("http://", "https://", "#")):
+    if not ref or ref.startswith(("http://", "https://", "#")):
         return None
 
     if ":" in ref:
@@ -347,7 +323,7 @@ def _resolve_texture_source(reference: str, default_namespace: str = "minecraft"
 
     rel = rel.lstrip("/")
     if rel.startswith("textures/"):
-        rel = rel[len("textures/") :]
+        rel = rel[len("textures/"):]
 
     namespace_order: List[str] = [namespace]
     if default_namespace not in namespace_order:
@@ -363,7 +339,6 @@ def _resolve_texture_source(reference: str, default_namespace: str = "minecraft"
         candidates = [base]
         if base.suffix == "":
             candidates.extend([base.with_suffix(".png"), base.with_suffix(".tga")])
-
         for candidate in candidates:
             if candidate.exists() and candidate.is_file():
                 return candidate
@@ -399,25 +374,14 @@ def _copy_or_get_texture_mapping(
         source_rel = source.relative_to(PACK_DIR).as_posix().lower()
     except Exception:
         source_rel = source.as_posix().lower()
+
     if "/textures/entity/" in source_rel:
-        mapped = _copy_to_target(
-            source,
-            "textures/entity",
-            "entity",
-            strip_suffix=True,
-            copy_sidecar_meta=True,
-        )
+        mapped = _copy_to_target(source, "textures/entity", "entity", strip_suffix=True, copy_sidecar_meta=True)
     else:
-        mapped = _copy_to_target(
-            source,
-            "textures",
-            "textures",
-            strip_suffix=True,
-            copy_sidecar_meta=True,
-        )
+        mapped = _copy_to_target(source, "textures", "textures", strip_suffix=True, copy_sidecar_meta=True)
+
     if not mapped:
         return None
-
     texture_copy_map[source] = mapped
     texture_entries.append(mapped)
     return mapped
@@ -431,33 +395,27 @@ def _resolve_and_copy_texture_refs(
     unresolved_texture_refs: Set[str],
 ) -> List[str]:
     resolved: List[str] = []
-
     for raw_ref in refs:
         if not isinstance(raw_ref, str):
             continue
-
         ref = raw_ref.strip()
         if not ref or not _looks_like_texture_ref(ref):
             continue
-
         unresolved_key = ref if ":" in ref else f"{default_namespace}:{ref}"
         source = _resolve_texture_source(ref, default_namespace=default_namespace)
         if not source:
             unresolved_texture_refs.add(unresolved_key)
             continue
-
         mapped = _copy_or_get_texture_mapping(source, texture_copy_map, texture_entries)
         if mapped:
             resolved.append(mapped)
         else:
             unresolved_texture_refs.add(unresolved_key)
-
     return sorted(set(resolved))
 
 
 def _extract_model_identifiers(model_json: Any, fallback: str) -> List[str]:
     identifiers: List[str] = []
-
     if not isinstance(model_json, dict):
         return [fallback]
 
@@ -512,7 +470,6 @@ def _extract_model_identifiers(model_json: Any, fallback: str) -> List[str]:
 
 
 def _collect_extra_textures() -> Dict[str, List[str]]:
-    """Copy painting, particle and other non-entity textures to target rp."""
     result: Dict[str, List[str]] = {}
     seen: Set[Path] = set()
     for category, *patterns in EXTRA_TEXTURE_CATEGORIES:
@@ -549,24 +506,13 @@ def _collect_modelengine_files() -> List[str]:
         if not any(hint in rel for hint in MODELENGINE_HINTS):
             continue
         if path.suffix.lower() not in (
-            ".json",
-            ".png",
-            ".tga",
-            ".anim",
-            ".bbmodel",
-            ".mcmeta",
-            ".material",
-            ".txt",
-            ".yml",
-            ".yaml",
+            ".json", ".png", ".tga", ".anim", ".bbmodel", ".mcmeta", ".material", ".txt", ".yml", ".yaml",
         ):
             continue
-
         destination = TARGET_RP_DIR / "modelengine" / path.relative_to(PACK_DIR)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, destination)
         copied.append(destination.relative_to(TARGET_RP_DIR).as_posix())
-
     return sorted(set(copied))
 
 
@@ -583,11 +529,18 @@ def run() -> None:
     parse_failures: List[str] = []
     unresolved_sources: Set[str] = set()
     unresolved_texture_refs: Set[str] = set()
+    skipped_java_models: List[str] = []
 
     for model_file in _iter_files(MODEL_PATTERNS):
         model_data = _safe_load(model_file)
         if model_data is None:
             parse_failures.append(model_file.relative_to(PACK_DIR).as_posix())
+            continue
+
+        # FIX: Skip Java-format entity models (they are NOT Bedrock geometry)
+        if not _is_bedrock_geo_format(model_data):
+            skipped_java_models.append(model_file.relative_to(PACK_DIR).as_posix())
+            _log(f"Skipping Java-format model (not Bedrock geo): {model_file.name}")
             continue
 
         model_source = model_file.relative_to(PACK_DIR).as_posix()
@@ -607,28 +560,28 @@ def run() -> None:
         identifiers = _extract_model_identifiers(model_data, fallback_identifier)
         model_texture_refs = _extract_string_refs(model_data, ("texture", "textures"))
         resolved_model_textures = _resolve_and_copy_texture_refs(
-            namespace,
-            model_texture_refs,
-            texture_copy_map,
-            texture_entries,
-            unresolved_texture_refs,
+            namespace, model_texture_refs, texture_copy_map, texture_entries, unresolved_texture_refs,
         )
-
-        model_entries.append(
-            {
-                "source": model_source,
-                "output": mapped,
-                "identifiers": identifiers,
-                "texture_refs": sorted(set(model_texture_refs)),
-                "resolved_texture_refs": resolved_model_textures,
-            }
-        )
+        model_entries.append({
+            "source": model_source,
+            "output": mapped,
+            "identifiers": identifiers,
+            "texture_refs": sorted(set(model_texture_refs)),
+            "resolved_texture_refs": resolved_model_textures,
+        })
 
     for animation_file in _iter_files(ANIMATION_PATTERNS):
         animation_data = _safe_load(animation_file)
         if animation_data is None:
             parse_failures.append(animation_file.relative_to(PACK_DIR).as_posix())
-        mapped = _copy_to_target(animation_file, "animations/imported", "animations")
+
+        # FIX: Only copy Bedrock-format animation files
+        if animation_data is not None and not isinstance(animation_data, dict):
+            unresolved_sources.add(animation_file.relative_to(PACK_DIR).as_posix())
+            continue
+
+        # FIX: copy to animations/ directly (not animations/imported/) so controllers can find them
+        mapped = _copy_to_target(animation_file, "animations", "animations")
         if not mapped:
             unresolved_sources.add(animation_file.relative_to(PACK_DIR).as_posix())
             continue
@@ -636,26 +589,22 @@ def run() -> None:
         refs = _extract_animation_refs(animation_data or {})
         default_ns = _asset_namespace_from_path(animation_file)
         resolved_textures = _resolve_and_copy_texture_refs(
-            default_ns,
-            refs.get("texture_refs", []),
-            texture_copy_map,
-            texture_entries,
-            unresolved_texture_refs,
+            default_ns, refs.get("texture_refs", []), texture_copy_map, texture_entries, unresolved_texture_refs,
         )
-        animation_entries.append(
-            {
-                "source": animation_file.relative_to(PACK_DIR).as_posix(),
-                "output": mapped,
-                "resolved_texture_refs": resolved_textures,
-                **refs,
-            }
-        )
+        animation_entries.append({
+            "source": animation_file.relative_to(PACK_DIR).as_posix(),
+            "output": mapped,
+            "resolved_texture_refs": resolved_textures,
+            **refs,
+        })
 
     for controller_file in _iter_files(CONTROLLER_PATTERNS):
         controller_data = _safe_load(controller_file)
         if controller_data is None:
             parse_failures.append(controller_file.relative_to(PACK_DIR).as_posix())
-        mapped = _copy_to_target(controller_file, "animation_controllers/imported", "animation_controllers")
+
+        # FIX: copy to animation_controllers/ directly (not animation_controllers/imported/)
+        mapped = _copy_to_target(controller_file, "animation_controllers", "animation_controllers")
         if not mapped:
             unresolved_sources.add(controller_file.relative_to(PACK_DIR).as_posix())
             continue
@@ -663,26 +612,21 @@ def run() -> None:
         refs = _extract_animation_controller_refs(controller_data or {})
         default_ns = _asset_namespace_from_path(controller_file)
         resolved_textures = _resolve_and_copy_texture_refs(
-            default_ns,
-            refs.get("texture_refs", []),
-            texture_copy_map,
-            texture_entries,
-            unresolved_texture_refs,
+            default_ns, refs.get("texture_refs", []), texture_copy_map, texture_entries, unresolved_texture_refs,
         )
-        controller_entries.append(
-            {
-                "source": controller_file.relative_to(PACK_DIR).as_posix(),
-                "output": mapped,
-                "resolved_texture_refs": resolved_textures,
-                **refs,
-            }
-        )
+        controller_entries.append({
+            "source": controller_file.relative_to(PACK_DIR).as_posix(),
+            "output": mapped,
+            "resolved_texture_refs": resolved_textures,
+            **refs,
+        })
 
     for attachable_file in _iter_files(ATTACHABLE_PATTERNS):
         attachable_data = _safe_load(attachable_file)
         if attachable_data is None:
             parse_failures.append(attachable_file.relative_to(PACK_DIR).as_posix())
-        mapped = _copy_to_target(attachable_file, "attachables/imported", "attachables")
+
+        mapped = _copy_to_target(attachable_file, "attachables", "attachables")
         if not mapped:
             unresolved_sources.add(attachable_file.relative_to(PACK_DIR).as_posix())
             continue
@@ -690,133 +634,101 @@ def run() -> None:
         refs = _extract_attachable_refs(attachable_data or {})
         default_ns = _asset_namespace_from_path(attachable_file)
         resolved_textures = _resolve_and_copy_texture_refs(
-            default_ns,
-            refs.get("texture_refs", []),
-            texture_copy_map,
-            texture_entries,
-            unresolved_texture_refs,
+            default_ns, refs.get("texture_refs", []), texture_copy_map, texture_entries, unresolved_texture_refs,
         )
-        attachable_entries.append(
-            {
-                "source": attachable_file.relative_to(PACK_DIR).as_posix(),
-                "output": mapped,
-                "resolved_texture_refs": resolved_textures,
-                **refs,
-            }
-        )
+        attachable_entries.append({
+            "source": attachable_file.relative_to(PACK_DIR).as_posix(),
+            "output": mapped,
+            "resolved_texture_refs": resolved_textures,
+            **refs,
+        })
 
-    for definition_file in _iter_files(ENTITY_DEFINITION_PATTERNS):
-        definition_data = _safe_load(definition_file)
-        if definition_data is None:
-            parse_failures.append(definition_file.relative_to(PACK_DIR).as_posix())
-        mapped = _copy_to_target(definition_file, "entity/imported", "entity")
+    for def_file in _iter_files(ENTITY_DEFINITION_PATTERNS):
+        def_data = _safe_load(def_file)
+        if def_data is None:
+            parse_failures.append(def_file.relative_to(PACK_DIR).as_posix())
+
+        mapped = _copy_to_target(def_file, "entity", "entity")
         if not mapped:
-            unresolved_sources.add(definition_file.relative_to(PACK_DIR).as_posix())
+            unresolved_sources.add(def_file.relative_to(PACK_DIR).as_posix())
             continue
+        definition_entries.append({
+            "source": def_file.relative_to(PACK_DIR).as_posix(),
+            "output": mapped,
+        })
 
-        refs = _extract_entity_definition_refs(definition_data or {})
-        default_ns = _asset_namespace_from_path(definition_file)
-        resolved_textures = _resolve_and_copy_texture_refs(
-            default_ns,
-            refs.get("texture_refs", []),
-            texture_copy_map,
-            texture_entries,
-            unresolved_texture_refs,
-        )
-        definition_entries.append(
-            {
-                "source": definition_file.relative_to(PACK_DIR).as_posix(),
-                "output": mapped,
-                "resolved_texture_refs": resolved_textures,
-                **refs,
-            }
-        )
+    for rc_file in _iter_files(RENDER_CONTROLLER_PATTERNS):
+        rc_data = _safe_load(rc_file)
+        if rc_data is None:
+            parse_failures.append(rc_file.relative_to(PACK_DIR).as_posix())
 
-    for render_controller_file in _iter_files(RENDER_CONTROLLER_PATTERNS):
-        controller_data = _safe_load(render_controller_file)
-        if controller_data is None:
-            parse_failures.append(render_controller_file.relative_to(PACK_DIR).as_posix())
-        mapped = _copy_to_target(render_controller_file, "render_controllers/imported", "render_controllers")
+        mapped = _copy_to_target(rc_file, "render_controllers", "render_controllers")
         if not mapped:
-            unresolved_sources.add(render_controller_file.relative_to(PACK_DIR).as_posix())
+            unresolved_sources.add(rc_file.relative_to(PACK_DIR).as_posix())
             continue
 
-        refs = _extract_render_controller_refs(controller_data or {})
-        default_ns = _asset_namespace_from_path(render_controller_file)
-        resolved_textures = _resolve_and_copy_texture_refs(
-            default_ns,
-            refs.get("texture_refs", []),
-            texture_copy_map,
-            texture_entries,
-            unresolved_texture_refs,
-        )
-        render_controller_entries.append(
-            {
-                "source": render_controller_file.relative_to(PACK_DIR).as_posix(),
-                "output": mapped,
-                "resolved_texture_refs": resolved_textures,
-                **refs,
-            }
-        )
+        refs = _extract_render_controller_refs(rc_data or {})
+        render_controller_entries.append({
+            "source": rc_file.relative_to(PACK_DIR).as_posix(),
+            "output": mapped,
+            **refs,
+        })
 
-    for texture_file in _iter_files(TEXTURE_PATTERNS):
-        mapped = _copy_or_get_texture_mapping(texture_file, texture_copy_map, texture_entries)
-        if mapped:
-            continue
-
-    for material_file in _iter_files(MATERIAL_PATTERNS):
-        mapped = _copy_to_target(material_file, "materials/imported", "materials")
+    for mat_file in _iter_files(MATERIAL_PATTERNS):
+        mapped = _copy_to_target(mat_file, "materials", "materials")
         if mapped:
             material_entries.append(mapped)
 
+    for tex_file in _iter_files(TEXTURE_PATTERNS):
+        source = tex_file
+        mapped = _copy_or_get_texture_mapping(source, texture_copy_map, texture_entries)
+        if not mapped:
+            unresolved_texture_refs.add(tex_file.relative_to(PACK_DIR).as_posix())
+
     extra_textures = _collect_extra_textures()
-    extra_texture_total = sum(len(v) for v in extra_textures.values())
-    modelengine_entries = _collect_modelengine_files()
-    parse_failure_set = set(parse_failures)
-    unresolved_source_set = set(unresolved_sources)
-    unresolved_texture_set = set(unresolved_texture_refs)
-    unresolved_total = len(parse_failure_set.union(unresolved_source_set).union(unresolved_texture_set))
+    extra_texture_count = sum(len(v) for v in extra_textures.values())
+
+    modelengine_files = _collect_modelengine_files()
+
+    unresolved_count = (
+        len(unresolved_sources) + len(parse_failures) + len(unresolved_texture_refs)
+    )
 
     payload = {
         "model_count": len(model_entries),
         "animation_count": len(animation_entries),
-        "animation_controller_count": len(controller_entries),
+        "controller_count": len(controller_entries),
         "attachable_count": len(attachable_entries),
         "entity_definition_count": len(definition_entries),
         "render_controller_count": len(render_controller_entries),
         "texture_count": len(texture_entries),
         "material_count": len(material_entries),
-        "extra_texture_count": extra_texture_total,
+        "extra_texture_count": extra_texture_count,
         "extra_textures": extra_textures,
-        "modelengine_asset_count": len(modelengine_entries),
-        "parse_failure_count": len(parse_failure_set),
-        "parse_failures": sorted(parse_failure_set),
-        "unresolved_texture_ref_count": len(unresolved_texture_set),
-        "unresolved_texture_refs": sorted(unresolved_texture_set),
-        "unresolved_ref_count": unresolved_total,
-        "missing_ref_count": unresolved_total,
-        "unresolved_sources": sorted(unresolved_source_set),
-        "models": sorted(model_entries, key=lambda item: item.get("source", "")),
-        "animations": sorted(animation_entries, key=lambda item: item.get("source", "")),
-        "animation_controllers": sorted(controller_entries, key=lambda item: item.get("source", "")),
-        "attachables": sorted(attachable_entries, key=lambda item: item.get("source", "")),
-        "entity_definitions": sorted(definition_entries, key=lambda item: item.get("source", "")),
-        "render_controllers": sorted(render_controller_entries, key=lambda item: item.get("source", "")),
-        "textures": sorted(set(texture_entries)),
-        "materials": sorted(set(material_entries)),
-        "modelengine_assets": modelengine_entries,
+        "modelengine_file_count": len(modelengine_files),
+        "skipped_java_model_count": len(skipped_java_models),
+        "skipped_java_models": skipped_java_models[:100],
+        "parse_failure_count": len(parse_failures),
+        "parse_failures": sorted(parse_failures),
+        "unresolved_source_count": len(unresolved_sources),
+        "unresolved_sources": sorted(unresolved_sources),
+        "unresolved_texture_ref_count": len(unresolved_texture_refs),
+        "unresolved_texture_refs": sorted(unresolved_texture_refs)[:100],
+        "unresolved_ref_count": unresolved_count,
+        "missing_ref_count": unresolved_count,
+        "models": model_entries,
+        "animations": animation_entries,
     }
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_FILE.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2, ensure_ascii=False)
+    with OUTPUT_FILE.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
     _log(
-        f"Imported {len(model_entries)} entity models, {len(animation_entries)} animations, "
-        f"{len(attachable_entries)} attachables, {len(definition_entries)} definitions, "
-        f"{len(render_controller_entries)} render controllers, "
-        f"{len(texture_entries)} entity textures, {len(material_entries)} materials, "
-        f"{extra_texture_total} extra textures (painting/particle)"
+        f"Copied {len(model_entries)} Bedrock entity models, "
+        f"{len(animation_entries)} animations, "
+        f"{len(attachable_entries)} attachables. "
+        f"Skipped {len(skipped_java_models)} Java-format models."
     )
 
 

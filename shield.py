@@ -12,12 +12,23 @@ def _log(message: str) -> None:
     print(f"[SHIELD] {message}", flush=True)
 
 
+# FIX: recursive glob + multiple fallback patterns
 def _find_attachable(namespace: str, path: str) -> Optional[str]:
-    files = glob.glob(f"staging/target/rp/attachables/{namespace}/{path}*.json")
-    suffix = f"{Path(path).name}."
-    for file_path in files:
-        if suffix in file_path:
-            return file_path
+    base_name = Path(path).name
+    suffix = f"{base_name}."
+    patterns = [
+        f"staging/target/rp/attachables/{namespace}/{path}*.json",
+        f"staging/target/rp/attachables/{namespace}/**/{base_name}.*.json",
+        f"staging/target/rp/attachables/**/{base_name}.*.json",
+    ]
+    seen: set = set()
+    for pattern in patterns:
+        for candidate in glob.glob(pattern, recursive=True):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if suffix in Path(candidate).name:
+                return candidate
     return None
 
 
@@ -40,8 +51,11 @@ def _cache_overrides() -> None:
     if not shield_model.exists():
         return
 
-    with shield_model.open("r", encoding="utf-8") as file:
-        data = json.load(file)
+    try:
+        with shield_model.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except Exception:
+        return
 
     overrides = data.get("overrides")
     if not isinstance(overrides, list):
@@ -84,8 +98,11 @@ def run() -> None:
     processed = 0
 
     for cache_file in glob.glob("cache/shield/*.json"):
-        with open(cache_file, "r", encoding="utf-8") as file:
-            data = json.load(file)
+        try:
+            with open(cache_file, "r", encoding="utf-8") as file:
+                data = json.load(file)
+        except Exception:
+            continue
 
         if data.get("check") != 2:
             continue
@@ -106,12 +123,21 @@ def run() -> None:
 
             attachable_file = _find_attachable(namespace, path)
             if not attachable_file:
+                _log(f"Could not find attachable for {namespace}:{path}")
                 continue
 
-            with open(attachable_file, "r", encoding="utf-8") as file:
-                current_data = json.load(file)
+            try:
+                with open(attachable_file, "r", encoding="utf-8") as file:
+                    current_data = json.load(file)
+            except Exception as exc:
+                _log(f"Failed to load attachable {attachable_file}: {exc}")
+                continue
 
-            description = current_data["minecraft:attachable"]["description"]
+            try:
+                description = current_data["minecraft:attachable"]["description"]
+            except (KeyError, TypeError):
+                continue
+
             animation_item = description.get("animations", {})
             gmdl = description.get("identifier", "")
 
@@ -133,23 +159,31 @@ def run() -> None:
                     {"offhand.thierd_person": f"!c.is_first_person && c.item_slot == 'off_hand' && q.is_item_name_any('slot.weapon.offhand', '{gmdl}') && !query.is_sneaking"},
                 ]
             else:
-                animation["mainhand.first_person.block"] = animation_item.get("firstperson_main_hand", "")
+                # blocking state: add blocking animations
                 animation["mainhand.thierd_person.block"] = animation_item.get("thirdperson_main_hand", "")
-                animation["offhand.first_person.block"] = animation_item.get("firstperson_off_hand", "")
+                animation["mainhand.first_person.block"] = animation_item.get("firstperson_main_hand", "")
                 animation["offhand.thierd_person.block"] = animation_item.get("thirdperson_off_hand", "")
-                if attachable_file != safe_attachable and os.path.exists(attachable_file):
+                animation["offhand.first_person.block"] = animation_item.get("firstperson_off_hand", "")
+                # Archive the superseded blocking attachable
+                if attachable_file and attachable_file != safe_attachable:
                     _archive_superseded_attachable(attachable_file)
 
-        if not safe_attachable or not attachable_data:
-            continue
-
-        description = attachable_data["minecraft:attachable"]["description"]
-        description["animations"] = animation
-        description.setdefault("scripts", {})["animate"] = animate
-
-        with open(safe_attachable, "w", encoding="utf-8") as file:
-            json.dump(attachable_data, file)
-        processed += 1
+        if safe_attachable and attachable_data and animation and animate:
+            try:
+                description = attachable_data["minecraft:attachable"]["description"]
+                description["animations"] = animation
+                description["scripts"] = {
+                    "animate": animate,
+                    "pre_animation": [
+                        "v.main_hand = c.item_slot == 'main_hand';",
+                        "v.off_hand = c.item_slot == 'off_hand';",
+                    ],
+                }
+                with open(safe_attachable, "w", encoding="utf-8") as file:
+                    json.dump(attachable_data, file, indent=2)
+                processed += 1
+            except Exception as exc:
+                _log(f"Failed to write shield attachable {safe_attachable}: {exc}")
 
     _log(f"Processed {processed} custom shields")
 

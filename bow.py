@@ -76,12 +76,24 @@ def _cache_override(model: str, predicate: Dict[str, object]) -> None:
         json.dump(cached, file, indent=2)
 
 
+# FIX: recursive glob + fallback patterns so we find attachables regardless
+# of whether the model path has subdirs like "item/my_bow" or "my_bow".
 def _find_attachable(namespace: str, path: str) -> Optional[str]:
-    candidates = glob.glob(f"staging/target/rp/attachables/{namespace}/{path}*.json")
-    suffix = f"{Path(path).name}."
-    for candidate in candidates:
-        if suffix in candidate:
-            return candidate
+    base_name = Path(path).name
+    suffix = f"{base_name}."
+    patterns = [
+        f"staging/target/rp/attachables/{namespace}/{path}*.json",
+        f"staging/target/rp/attachables/{namespace}/**/{base_name}.*.json",
+        f"staging/target/rp/attachables/**/{base_name}.*.json",
+    ]
+    seen: set = set()
+    for pattern in patterns:
+        for candidate in glob.glob(pattern, recursive=True):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if suffix in Path(candidate).name:
+                return candidate
     return None
 
 
@@ -138,26 +150,42 @@ def run() -> None:
 
             attachable = _find_attachable(namespace, path)
             if not attachable:
+                _log(f"Could not find attachable for {namespace}:{path}")
                 continue
 
-            with open(attachable, "r", encoding="utf-8") as file:
-                dataA = json.load(file)
+            try:
+                with open(attachable, "r", encoding="utf-8") as file:
+                    dataA = json.load(file)
+            except Exception as exc:
+                _log(f"Failed to load attachable {attachable}: {exc}")
+                continue
 
-            description = dataA["minecraft:attachable"]["description"]
+            try:
+                description = dataA["minecraft:attachable"]["description"]
+            except (KeyError, TypeError):
+                _log(f"Malformed attachable: {attachable}")
+                continue
+
             textures.append(description["textures"]["default"])
 
-            model_files = glob.glob(f"staging/target/rp/models/blocks/{namespace}/{path}.json")
+            # FIX: search model in both blocks/ and items/ locations
+            model_files = (
+                glob.glob(f"staging/target/rp/models/blocks/{namespace}/{path}.json")
+                or glob.glob(f"staging/target/rp/models/blocks/{namespace}/**/{Path(path).name}.json", recursive=True)
+            )
             if not model_files:
-                continue
-
-            is_2d_bow = Bow_Util.is2Dbow(model_files[0])
-            if is_2d_bow:
+                # fallback: treat as 2D
                 geometry.append("geometry.bow_standby" if i == 0 else f"geometry.bow_pulling_{i - 1}")
             else:
-                geometry.append(description["geometry"]["default"])
+                is_2d_bow = Bow_Util.is2Dbow(model_files[0])
+                if is_2d_bow:
+                    geometry.append("geometry.bow_standby" if i == 0 else f"geometry.bow_pulling_{i - 1}")
+                else:
+                    geometry.append(description["geometry"]["default"])
 
             if i == 0:
-                if is_2d_bow:
+                is_2d = (len(geometry) > 0 and geometry[0] == "geometry.bow_standby")
+                if is_2d:
                     animate = [
                         {"wield": "c.is_first_person"},
                         {"third_person": "!c.is_first_person"},
@@ -192,7 +220,7 @@ def run() -> None:
                 mdefault = description["materials"]["default"]
                 menchanted = description["materials"]["enchanted"]
                 gmdl = description["identifier"].split(":", 1)[1]
-                animations = description["animations"]
+                animations = dict(description.get("animations", {}))
                 animations["wield"] = "animation.player.bow_custom.first_person"
                 animations["third_person"] = "animation.player.bow_custom"
                 animations["wield_first_person_pull"] = "animation.bow.wield_first_person_pull"
@@ -203,6 +231,7 @@ def run() -> None:
                     _archive_superseded_attachable(attachable)
 
         if len(textures) != 4 or len(geometry) != 4:
+            _log(f"Skipping cache entry with only {len(textures)} textures / {len(geometry)} geometries")
             continue
 
         if mfile and gmdl and mdefault and menchanted and animations and animate and pre_animation:

@@ -1046,16 +1046,16 @@ def main() -> None:
         (
             "armor",
             "ARMOR_CONVERSION",
-            (PACK_WORK_DIR / "assets/minecraft/optifine/cit/ia_generated_armors").exists(),
+            ((PACK_WORK_DIR / "assets/minecraft/optifine/cit/ia_generated_armors").exists() or any(PACK_WORK_DIR.glob("assets/*/models/item/leather_*.json"))),
         ),
         ("font", "FONT_CONVERSION", signals.get("font", 0) > 0),
-        ("bow", "BOW_CONVERSION", any(PACK_WORK_DIR.glob("assets/**/models/item/bow.json"))),
-        ("shield", "SHIELD_CONVERSION", any(PACK_WORK_DIR.glob("assets/**/models/item/shield.json"))),
+        ("bow", "BOW_CONVERSION", (any(PACK_WORK_DIR.glob("assets/**/models/item/bow.json")) or any(PACK_WORK_DIR.glob("assets/*/models/item/bow.json")))),
+        ("shield", "SHIELD_CONVERSION", (any(PACK_WORK_DIR.glob("assets/**/models/item/shield.json")) or any(PACK_WORK_DIR.glob("assets/*/models/item/shield.json")))),
         ("blocks", "BLOCK_CONVERSION", signals.get("blocks", 0) > 0),
         ("ranks", "RANK_CONVERSION", signals.get("ranks", 0) > 0),
         ("gui", "GUI_CONVERSION", signals.get("gui", 0) > 0),
         ("particles", "PARTICLE_CONVERSION", signals.get("particles", 0) > 0),
-        ("entity", "ENTITY_CONVERSION", signals.get("entity", 0) > 0),
+        ("entity", "ENTITY_CONVERSION", signals.get("entity", 0) > 0 or _count_pack_sources(["assets/**/animations/**/*.json", "assets/**/animation_controllers/**/*.json", "assets/**/attachables/**/*.json"]) > 0),
         ("bedrock_post", "BEDROCK_POST", True),
     ]
 
