@@ -389,7 +389,12 @@ def _canonical_java_item_key(item_id: Any, *, allow_custom_path: bool = False) -
 
 
 def _mapping_entry_has_predicate(entry: Dict[str, Any]) -> bool:
-    return any(entry.get(key) is not None for key in ("custom_model_data", "damage_predicate", "unbreakable"))
+    # Geyser v2 expresses damage/unbreakable via the "predicate" system, so an
+    # entry that carries a "predicate" (or the legacy top-level fields) is a
+    # runtime-matched mapping and must be kept.
+    if any(entry.get(key) is not None for key in ("custom_model_data", "damage_predicate", "unbreakable")):
+        return True
+    return entry.get("predicate") is not None
 
 
 def _known_java_item_key(item_id: Any) -> bool:
@@ -710,15 +715,39 @@ def _convert_mcmeta_flipbooks() -> Dict[str, Any]:
             frame_size = int(animation.get("width") or 16)
             frame_count = 1
 
-        ticks = int(animation.get("frametime") or 1)
+        ticks = max(1, int(animation.get("frametime") or 1))
+        # Honour Java's explicit "frames" list (custom order + optional per-frame
+        # time). Bedrock has no per-frame duration, so a frame with time T is
+        # approximated by repeating its index round(T / ticks_per_frame) times.
+        frames_field = animation.get("frames")
+        frames_list: List[int] = []
+        if isinstance(frames_field, list) and frames_field:
+            for fr in frames_field:
+                if isinstance(fr, bool):
+                    continue
+                if isinstance(fr, (int, float)):
+                    frames_list.append(int(fr))
+                elif isinstance(fr, dict):
+                    idx = fr.get("index")
+                    if not isinstance(idx, int) or isinstance(idx, bool):
+                        continue
+                    frame_time = fr.get("time")
+                    reps = 1
+                    if isinstance(frame_time, (int, float)) and not isinstance(frame_time, bool) and frame_time > 0:
+                        reps = max(1, round(float(frame_time) / ticks))
+                    frames_list.extend([idx] * reps)
+        if not frames_list:
+            frames_list = list(range(frame_count))
+
         entry: Dict[str, Any] = {
             "flipbook_texture": stem,
             "atlas_tile": stem,
-            "ticks_per_frame": max(1, ticks),
-            "frames": list(range(frame_count)),
+            "ticks_per_frame": ticks,
+            "frames": frames_list,
         }
-        if animation.get("interpolate") is True:
-            entry["blend_frames"] = True
+        # Java "interpolate" maps to Bedrock "blend_frames"; default is true on
+        # Bedrock, so emit it explicitly in both directions to preserve intent.
+        entry["blend_frames"] = animation.get("interpolate") is True
         entries.append(entry)
         seen.add(stem)
         converted += 1
@@ -855,8 +884,16 @@ def _write_texture_sets() -> Dict[str, Any]:
             by_base.setdefault(base, {})[channel] = texture
 
         for base, channels in by_base.items():
-            if len(set(channels) - {"color"}) == 0:
+            # minecraft:texture_set only supports color + metalness_emissive_roughness
+            # + exactly one of normal|heightmap. A standalone "emissive" texture has
+            # no valid layer (emissive is the green channel of the MER map), so it is
+            # NOT a reason to emit a texture set on its own.
+            if not any(channel in channels for channel in ("normal", "heightmap", "mer")):
                 continue
+            # normal and heightmap are mutually exclusive (defining both is a
+            # Bedrock CONTENT_ERROR); prefer the normal map when both are present.
+            if "normal" in channels and "heightmap" in channels:
+                channels.pop("heightmap", None)
             color = channels.get("color")
             if color is None:
                 for ext in TEXTURE_EXTENSIONS:
@@ -875,9 +912,8 @@ def _write_texture_sets() -> Dict[str, Any]:
                 "normal": "normal",
                 "heightmap": "heightmap",
                 "mer": "metalness_emissive_roughness",
-                "emissive": "emissive",
             }
-            for channel in ("normal", "heightmap", "mer", "emissive"):
+            for channel in ("normal", "heightmap", "mer"):
                 source = channels.get(channel)
                 if source:
                     channel_stem = _texture_stem_from_output(source)
@@ -1064,8 +1100,16 @@ def _generate_item_components_from_mappings() -> Dict[str, Any]:
         for entry in iterable:
             if not isinstance(entry, dict):
                 continue
-            icon = entry.get("icon")
-            name = entry.get("name") or entry.get("item_model") or entry.get("model")
+            # Geyser v2 keeps the icon under bedrock_options.icon (a shortname KEY);
+            # fall back to a legacy top-level "icon" (which may be a texture path).
+            options = entry.get("bedrock_options") if isinstance(entry.get("bedrock_options"), dict) else {}
+            icon = options.get("icon") or entry.get("icon")
+            name = (
+                entry.get("bedrock_identifier")
+                or entry.get("name")
+                or entry.get("model")
+                or entry.get("item_model")
+            )
             if not isinstance(name, str) or not name.strip():
                 if isinstance(icon, str):
                     name = _atlas_key_from_texture(icon, "textures/items/")
@@ -1078,9 +1122,15 @@ def _generate_item_components_from_mappings() -> Dict[str, Any]:
                 continue
 
             icon_key = bedrock_name
-            if isinstance(icon, str) and icon.startswith("textures/"):
-                icon_key = _atlas_key_from_texture(icon, "textures/items/")
-                _add_item_texture(icon_key, icon)
+            if isinstance(icon, str) and icon.strip():
+                if icon.startswith("textures/"):
+                    # Legacy texture-path icon: register an atlas entry for it.
+                    icon_key = _atlas_key_from_texture(icon, "textures/items/")
+                    _add_item_texture(icon_key, icon)
+                else:
+                    # v2 shortname key: already registered in item_texture.json
+                    # by _ensure_atlas_entries; use it directly.
+                    icon_key = icon
 
             components: Dict[str, Any] = {
                 "minecraft:icon": {"texture": icon_key},

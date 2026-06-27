@@ -574,6 +574,8 @@ def run() -> None:
         animation_data = _safe_load(animation_file)
         if animation_data is None:
             parse_failures.append(animation_file.relative_to(PACK_DIR).as_posix())
+            # FIX: do not copy unparseable JSON into the Bedrock pack (would break pack load)
+            continue
 
         # FIX: Only copy Bedrock-format animation files
         if animation_data is not None and not isinstance(animation_data, dict):
@@ -602,6 +604,8 @@ def run() -> None:
         controller_data = _safe_load(controller_file)
         if controller_data is None:
             parse_failures.append(controller_file.relative_to(PACK_DIR).as_posix())
+            # FIX: do not copy unparseable JSON into the Bedrock pack (would break pack load)
+            continue
 
         # FIX: copy to animation_controllers/ directly (not animation_controllers/imported/)
         mapped = _copy_to_target(controller_file, "animation_controllers", "animation_controllers")
@@ -625,6 +629,8 @@ def run() -> None:
         attachable_data = _safe_load(attachable_file)
         if attachable_data is None:
             parse_failures.append(attachable_file.relative_to(PACK_DIR).as_posix())
+            # FIX: do not copy unparseable JSON into the Bedrock pack (would break pack load)
+            continue
 
         mapped = _copy_to_target(attachable_file, "attachables", "attachables")
         if not mapped:
@@ -647,6 +653,8 @@ def run() -> None:
         def_data = _safe_load(def_file)
         if def_data is None:
             parse_failures.append(def_file.relative_to(PACK_DIR).as_posix())
+            # FIX: do not copy unparseable JSON into the Bedrock pack (would break pack load)
+            continue
 
         mapped = _copy_to_target(def_file, "entity", "entity")
         if not mapped:
@@ -661,6 +669,8 @@ def run() -> None:
         rc_data = _safe_load(rc_file)
         if rc_data is None:
             parse_failures.append(rc_file.relative_to(PACK_DIR).as_posix())
+            # FIX: do not copy unparseable JSON into the Bedrock pack (would break pack load)
+            continue
 
         mapped = _copy_to_target(rc_file, "render_controllers", "render_controllers")
         if not mapped:

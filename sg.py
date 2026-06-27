@@ -2422,7 +2422,47 @@ def to_geyser_mappings_v1(mapping: Dict[str, List[Dict[str, Any]]]) -> Dict[str,
     return payload
 
 
+def _humanize_item_name(item_key: str) -> str:
+    """Produce a clean, human-readable display name from a Java item key.
+
+    'minecraft:diamond_sword' -> 'Diamond Sword'; 'ns:custom/foo_bar' -> 'Foo Bar'.
+    Falls back to the raw base token if humanisation yields nothing.
+    """
+    base = str(item_key).split(':')[-1].split('/')[-1]
+    pretty = base.replace('_', ' ').strip().title()
+    return pretty or base
+
+
+def _v2_extra_predicates(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Translate the internal damage/unbreakable fields into valid Geyser v2
+    predicate objects.  custom_model_data is handled separately by the caller.
+
+    - damage_predicate (absolute item damage)  -> range_dispatch property 'damage'
+      (Geyser matches when (value*scale) >= threshold; sg already stores the
+       absolute damage value, so normalize is left at its default of false).
+    - unbreakable                               -> condition has_component
+      'minecraft:unbreakable'.
+    """
+    predicates: List[Dict[str, Any]] = []
+    dmg = entry.get('damage_predicate')
+    if dmg is not None:
+        predicates.append({'type': 'range_dispatch', 'property': 'damage', 'threshold': dmg})
+    if entry.get('unbreakable') is True:
+        predicates.append({'type': 'condition', 'property': 'has_component', 'component': 'minecraft:unbreakable'})
+    return predicates
+
+
 def to_geyser_mappings_v2(mapping: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Emit Geyser custom-items mappings in the schema-correct v2 format.
+
+    Per https://geysermc.org/wiki/geyser/custom-items :
+      * each entry carries a "type" ("legacy" for plain custom_model_data,
+        "definition" for the 1.21.4+ item_model system / predicate-based entries),
+      * icon and allow_offhand live inside "bedrock_options" (icon must be the
+        item_texture.json shortname KEY, never a texture path),
+      * damage / unbreakable are expressed via the "predicate" system, NOT the
+        v1 "damage_predicate"/"unbreakable" top-level fields.
+    """
     items: Dict[str, List[Dict[str, Any]]] = {}
     skipped: Dict[str, str] = {}
     for item_key, entries in sorted(mapping.items()):
@@ -2438,28 +2478,43 @@ def to_geyser_mappings_v2(mapping: Dict[str, List[Dict[str, Any]]]) -> Dict[str,
             ):
                 skipped[str(item_key)] = 'missing_custom_model_predicate'
                 continue
-            mapping_type = _entry_mapping_type(entry)
+
             entry_name = _entry_name(item_key, entry)
             icon_key = _atlas_icon_key(entry.get('sprite', ''))
-            out_entry: Dict[str, Any] = {
-                'type': mapping_type,
-                'name': entry_name,
-                'bedrock_identifier': f'geyser_custom:{entry_name}',
-                'allow_offhand': True,
-                'icon': entry.get('sprite', ''),
-                'display_name': item_key,
-            }
+            bedrock_options: Dict[str, Any] = {'allow_offhand': True}
             if icon_key:
-                out_entry['bedrock_options'] = {'icon': icon_key}
-            if mapping_type == 'definition':
-                out_entry['model'] = entry.get('item_model') or bedrock_item
-                out_entry['item_model'] = entry.get('item_model') or bedrock_item
-            if entry.get('custom_model_data') is not None:
-                out_entry['custom_model_data'] = entry.get('custom_model_data')
-            if entry.get('damage_predicate') is not None:
-                out_entry['damage_predicate'] = entry.get('damage_predicate')
-            if entry.get('unbreakable') is True:
-                out_entry['unbreakable'] = True
+                bedrock_options['icon'] = icon_key
+
+            cmd = entry.get('custom_model_data')
+            extra_predicates = _v2_extra_predicates(entry)
+
+            base: Dict[str, Any] = {
+                'bedrock_identifier': f'geyser_custom:{entry_name}',
+                'display_name': _humanize_item_name(item_key),
+                'bedrock_options': bedrock_options,
+            }
+
+            if cmd is not None and not extra_predicates:
+                # Plain custom_model_data -> "legacy" type (the v2 CMD shortcut,
+                # which checks floats[0] of the custom_model_data component on 1.21.4+).
+                out_entry: Dict[str, Any] = {'type': 'legacy', 'custom_model_data': int(cmd)}
+                out_entry.update(base)
+            else:
+                # 1.21.4+ item_model definition, or a predicate-based mapping
+                # (damage / unbreakable, optionally combined with custom_model_data).
+                model_ref = entry.get('item_model') or bedrock_item
+                out_entry = {'type': 'definition', 'model': model_ref}
+                out_entry.update(base)
+                preds: List[Dict[str, Any]] = []
+                if cmd is not None:
+                    preds.append({'type': 'range_dispatch', 'property': 'custom_model_data', 'threshold': int(cmd)})
+                preds.extend(extra_predicates)
+                if len(preds) == 1:
+                    out_entry['predicate'] = preds[0]
+                elif len(preds) > 1:
+                    out_entry['predicate'] = preds
+                    out_entry['predicate_strategy'] = 'and'
+
             if entry.get('source_kind'):
                 out_entry['source_kind'] = entry.get('source_kind')
             converted.append(out_entry)
