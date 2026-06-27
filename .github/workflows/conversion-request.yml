@@ -14,8 +14,6 @@ jobs:
   get-pack-info:
     name: Phân tích yêu cầu chuyển đổi
     runs-on: ubuntu-latest
-    # FIX 1: Thêm state == 'open' để chặn double-run khi GitHub bắn cả
-    #         'opened' lẫn 'labeled' khi tạo issue từ template có sẵn label.
     if: contains(github.event.issue.labels.*.name, 'conversion') && github.event.issue.state == 'open'
     permissions:
       issues: read
@@ -46,15 +44,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          ALLOWED_ATTACHMENT_REGEX='https?://(github\.com/user-attachments/(files|assets)/|github\.com/[^/]+/[^/]+/assets/[0-9]+/|user-images\.githubusercontent\.com/|private-user-images\.githubusercontent\.com/)[^[:space:])>]+'
+          # Link đính kèm nội bộ GitHub (kết quả kéo-thả hoặc upload trực tiếp)
+          GITHUB_ATTACHMENT_REGEX='https?://(github\.com/user-attachments/(files|assets)/|github\.com/[^/]+/[^/]+/assets/[0-9]+/|user-images\.githubusercontent\.com/|private-user-images\.githubusercontent\.com/)[^[:space:])>]+'
+          # Dịch vụ chia sẻ tệp bị chặn — KHÔNG phải direct link, chỉ là trang chia sẻ trung gian
+          BLOCKED_SHARING_REGEX='https?://(drive\.google\.com|docs\.google\.com|mediafire\.com|([a-z0-9-]+\.)?dropbox\.com|onedrive\.live\.com|1drv\.ms|mega\.nz|wetransfer\.com|sendspace\.com|zippyshare\.com)[^[:space:])>]*'
+          # Bất kỳ URL nào
           ANY_URL_REGEX='https?://[^[:space:])>]+'
 
-          extract_attachment_from_text() {
+          # Trích xuất URL từ text: ưu tiên GitHub attachment, fallback direct link (không bị chặn)
+          extract_url_from_text() {
             local text="${1:-}"
             if [[ -z "${text}" ]]; then
               return 0
             fi
-            printf '%s' "${text}" | grep -Eo "${ALLOWED_ATTACHMENT_REGEX}" | head -n 1 || true
+            # Ưu tiên 1: link đính kèm nội bộ GitHub (kéo-thả)
+            local github_url
+            github_url="$(printf '%s' "${text}" | grep -Eo "${GITHUB_ATTACHMENT_REGEX}" | head -n 1 || true)"
+            if [[ -n "${github_url}" ]]; then
+              printf '%s' "${github_url}"
+              return 0
+            fi
+            # Ưu tiên 2: bất kỳ direct link nào không thuộc dịch vụ chia sẻ bị chặn
+            while IFS= read -r url; do
+              [[ -z "${url}" ]] && continue
+              if ! printf '%s' "${url}" | grep -Eq "${BLOCKED_SHARING_REGEX}"; then
+                printf '%s' "${url}"
+                return 0
+              fi
+            done < <(printf '%s' "${text}" | grep -Eo "${ANY_URL_REGEX}" || true)
           }
 
           extract_section_text() {
@@ -90,8 +107,17 @@ jobs:
               {}
             end;
 
-          def attachment_regex:
+          # Link đính kèm nội bộ GitHub
+          def github_attachment_regex:
             "https?://(?:github\\.com/user-attachments/(?:files|assets)/|github\\.com/[^/]+/[^/]+/assets/[0-9]+/|user-images\\.githubusercontent\\.com/|private-user-images\\.githubusercontent\\.com/)[^\\s\\)>]+";
+
+          # Dịch vụ chia sẻ tệp bị chặn
+          def blocked_sharing_regex:
+            "https?://(?:(?:drive|docs)\\.google\\.com|mediafire\\.com|(?:[a-z0-9-]+\\.)?dropbox\\.com|onedrive\\.live\\.com|1drv\\.ms|mega\\.nz|wetransfer\\.com|sendspace\\.com|zippyshare\\.com)[^\\s\\)>]*";
+
+          # Bất kỳ URL nào
+          def any_url_regex:
+            "https?://[^\\s\\)>]+";
 
           def field_text($form; $id):
             ($form[$id] // "") as $field
@@ -114,24 +140,32 @@ jobs:
           def is_blank($text):
             ($text == "" or $text == "*No response*" or $text == "*Không có phản hồi*" or $text == "None" or $text == "null");
 
-          def extract_attachment_url($input):
+          # Trích xuất URL: ưu tiên GitHub attachment, fallback direct link không bị chặn
+          def extract_url($input):
             (normalize($input)) as $text
             | if is_blank($text) then "null"
-              else (
-                ([ $text | scan(attachment_regex) ]) as $matches
-                | if (($matches | length) > 0) then $matches[0] else "null" end
-              )
+              else
+                # Ưu tiên 1: link đính kèm nội bộ GitHub
+                ([ $text | scan(github_attachment_regex) ]) as $github_matches
+                | if ($github_matches | length) > 0 then $github_matches[0]
+                  else
+                    # Ưu tiên 2: direct link không thuộc dịch vụ chia sẻ bị chặn
+                    ([ $text | scan(any_url_regex) ] | map(select(test(blocked_sharing_regex) | not))) as $direct_matches
+                    | if ($direct_matches | length) > 0 then $direct_matches[0]
+                      else "null"
+                      end
+                  end
               end;
 
-          def has_external_url($input):
+          # Phát hiện link dịch vụ chia sẻ bị chặn (KHÔNG phải mọi link ngoài)
+          def has_blocked_url($input):
             (normalize($input)) as $text
             | if is_blank($text) then false
-              else (
-                ([ $text | scan("https?://[^\\s\\)>]+") ]) as $urls
-                | if (($urls | length) == 0) then false
-                  else any($urls[]; (test(attachment_regex) | not))
+              else
+                ([ $text | scan(any_url_regex) ]) as $urls
+                | if ($urls | length) == 0 then false
+                  else any($urls[]; test(blocked_sharing_regex))
                   end
-              )
               end;
 
           def pick($input; $default):
@@ -141,12 +175,12 @@ jobs:
           ensure_object as $form
           |
           {
-            "pack_url": extract_attachment_url(field_text($form; "java-pack-upload")),
-            "default_pack_url": extract_attachment_url(field_text($form; "default-pack-upload")),
-            "merge_pack_url": extract_attachment_url(field_text($form; "bedrock-merge-pack-upload")),
-            "pack_has_external_url": has_external_url(field_text($form; "java-pack-upload")),
-            "default_pack_has_external_url": has_external_url(field_text($form; "default-pack-upload")),
-            "merge_pack_has_external_url": has_external_url(field_text($form; "bedrock-merge-pack-upload")),
+            "pack_url": extract_url(field_text($form; "java-pack-upload")),
+            "default_pack_url": extract_url(field_text($form; "default-pack-upload")),
+            "merge_pack_url": extract_url(field_text($form; "bedrock-merge-pack-upload")),
+            "pack_has_blocked_url": has_blocked_url(field_text($form; "java-pack-upload")),
+            "default_pack_has_blocked_url": has_blocked_url(field_text($form; "default-pack-upload")),
+            "merge_pack_has_blocked_url": has_blocked_url(field_text($form; "bedrock-merge-pack-upload")),
             "default_assets_version": pick(field_text($form; "default-assets-version"); "1.21.5"),
             "block_material": pick(field_text($form; "block-material"); "alpha_test"),
             "attachable_material": pick(field_text($form; "attachable-material"); "entity_alphatest_one_sided"),
@@ -170,20 +204,22 @@ jobs:
           DEFAULT_PACK_URL="$(jq -r '.default_pack_url // "null"' inputs.json)"
           MERGE_PACK_URL="$(jq -r '.merge_pack_url // "null"' inputs.json)"
 
+          # Fallback: parse lại từ raw issue body nếu jq parser không nhận được dữ liệu
           if [[ "${PACK_URL}" == "null" || -z "${PACK_URL}" ]]; then
-            PACK_URL="$(extract_attachment_from_text "$(extract_section_text 'Tệp Java Pack (bắt buộc)' "${ISSUE_BODY}")")"
+            PACK_URL="$(extract_url_from_text "$(extract_section_text 'Tệp Java Pack (bắt buộc)' "${ISSUE_BODY}")")"
           fi
 
           if [[ "${DEFAULT_PACK_URL}" == "null" || -z "${DEFAULT_PACK_URL}" ]]; then
-            DEFAULT_PACK_URL="$(extract_attachment_from_text "$(extract_section_text 'Tệp Gói Mặc Định (tuỳ chọn)' "${ISSUE_BODY}")")"
+            DEFAULT_PACK_URL="$(extract_url_from_text "$(extract_section_text 'Tệp Gói Mặc Định (tuỳ chọn)' "${ISSUE_BODY}")")"
           fi
 
           if [[ "${MERGE_PACK_URL}" == "null" || -z "${MERGE_PACK_URL}" ]]; then
-            MERGE_PACK_URL="$(extract_attachment_from_text "$(extract_section_text 'Tệp Gói Bedrock Để Gộp (tuỳ chọn)' "${ISSUE_BODY}")")"
+            MERGE_PACK_URL="$(extract_url_from_text "$(extract_section_text 'Tệp Gói Bedrock Để Gộp (tuỳ chọn)' "${ISSUE_BODY}")")"
           fi
 
+          # Fallback cuối: quét toàn bộ body
           if [[ "${PACK_URL}" == "null" || -z "${PACK_URL}" ]]; then
-            PACK_URL="$(extract_attachment_from_text "${ISSUE_BODY}")"
+            PACK_URL="$(extract_url_from_text "${ISSUE_BODY}")"
           fi
 
           if [[ "${DEFAULT_PACK_URL}" == "null" || -z "${DEFAULT_PACK_URL}" ]]; then
@@ -194,30 +230,34 @@ jobs:
             MERGE_PACK_URL="null"
           fi
 
-          HAS_EXTERNAL_URL="$(jq -r '.pack_has_external_url or .default_pack_has_external_url or .merge_pack_has_external_url' inputs.json)"
-          BODY_HAS_EXTERNAL_URL="false"
+          # Kiểm tra link dịch vụ chia sẻ bị chặn (Google Drive, MediaFire, Dropbox, v.v.)
+          # Direct link thông thường (github releases, cdn, v.v.) ĐƯỢC PHÉP
+          HAS_BLOCKED_URL="$(jq -r '.pack_has_blocked_url or .default_pack_has_blocked_url or .merge_pack_has_blocked_url' inputs.json)"
+          BODY_HAS_BLOCKED_URL="false"
           while IFS= read -r detected_url; do
             [[ -z "${detected_url}" ]] && continue
-            if ! printf '%s' "${detected_url}" | grep -Eq "^${ALLOWED_ATTACHMENT_REGEX}$"; then
-              BODY_HAS_EXTERNAL_URL="true"
+            if printf '%s' "${detected_url}" | grep -Eq "${BLOCKED_SHARING_REGEX}"; then
+              BODY_HAS_BLOCKED_URL="true"
               break
             fi
           done < <(printf '%s' "${ISSUE_BODY}" | grep -Eo "${ANY_URL_REGEX}" || true)
 
-          if [[ "${HAS_EXTERNAL_URL}" != "true" && "${BODY_HAS_EXTERNAL_URL}" == "true" ]]; then
-            HAS_EXTERNAL_URL="true"
+          if [[ "${HAS_BLOCKED_URL}" != "true" && "${BODY_HAS_BLOCKED_URL}" == "true" ]]; then
+            HAS_BLOCKED_URL="true"
           fi
 
-          if [[ "${HAS_EXTERNAL_URL}" == "true" ]]; then
-            echo "Phát hiện liên kết ngoài không hợp lệ trong biểu mẫu."
-            echo "Vui lòng chỉ kéo-thả tệp trực tiếp vào các ô nhập để GitHub tạo liên kết tệp đính kèm nội bộ."
-            echo "Không dùng Google Drive, MediaFire, Dropbox, OneDrive hoặc link tải ngoài khác."
+          if [[ "${HAS_BLOCKED_URL}" == "true" ]]; then
+            echo "Phát hiện link dịch vụ chia sẻ tệp không được hỗ trợ trong biểu mẫu."
+            echo "Vui lòng gửi tệp bằng một trong hai cách hợp lệ:"
+            echo "  ① Kéo-thả tệp trực tiếp vào ô nhập — GitHub sẽ tạo liên kết đính kèm nội bộ."
+            echo "  ② Dán direct link tải thẳng — URL mở ra là tải ngay file, không qua trang trung gian."
+            echo "Không dùng link trang chia sẻ: Google Drive, MediaFire, Dropbox, OneDrive, MEGA, WeTransfer, v.v."
             exit 1
           fi
 
           if [[ "${PACK_URL}" == "null" || -z "${PACK_URL}" ]]; then
-            echo "Không tìm thấy tệp đính kèm hợp lệ cho Java Pack."
-            echo "Hãy kéo-thả tệp vào trường 'Tệp Java Pack (bắt buộc)' trong biểu mẫu issue, không cần dán link ngoài."
+            echo "Không tìm thấy tệp hợp lệ cho Java Pack."
+            echo "Hãy kéo-thả tệp vào trường 'Tệp Java Pack (bắt buộc)', hoặc dán direct link tải thẳng tệp vào đó."
             exit 1
           fi
 
@@ -299,23 +339,31 @@ jobs:
         run: |
           mkdir -p staging
 
-          COLUMNS=$COLUMNS-1 curl --no-styled-output -#fL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -o staging/input_pack.zip "${PACK_URL}"
+          # Hàm download: chỉ gửi Authorization header cho GitHub URLs
+          download_file() {
+            local url="${1}"
+            local output="${2}"
+            if printf '%s' "${url}" | grep -Eq '^https?://([a-z0-9-]+\.)?(github\.com|githubusercontent\.com)/'; then
+              COLUMNS=$COLUMNS-1 curl --no-styled-output -#fL \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -o "${output}" "${url}"
+            else
+              COLUMNS=$COLUMNS-1 curl --no-styled-output -#fL \
+                -o "${output}" "${url}"
+            fi
+          }
+
+          download_file "${PACK_URL}" staging/input_pack.zip
 
           FALLBACK_INPUT_VALUE="null"
           if [ "${DEFAULT_PACK_URL}" != "null" ]; then
-            COLUMNS=$COLUMNS-1 curl --no-styled-output -#fL \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              -o staging/default_pack.zip "${DEFAULT_PACK_URL}"
+            download_file "${DEFAULT_PACK_URL}" staging/default_pack.zip
             FALLBACK_INPUT_VALUE="file://$(pwd)/staging/default_pack.zip"
           fi
 
           MERGE_INPUT_VALUE="null"
           if [ "${MERGE_PACK_URL}" != "null" ]; then
-            COLUMNS=$COLUMNS-1 curl --no-styled-output -#fL \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              -o staging/merge_pack.zip "${MERGE_PACK_URL}"
+            download_file "${MERGE_PACK_URL}" staging/merge_pack.zip
             MERGE_INPUT_VALUE="merge_pack.zip"
           fi
 
@@ -336,10 +384,6 @@ jobs:
 
           popd >/dev/null
 
-      # FIX 2: Tách artifact thành 2 phần — kết quả chính và chẩn đoán.
-      # FIX 3: Gắn issue number + run id vào tên artifact để tránh xung đột
-      #         khi issue bị edited và workflow chạy lại (upload-artifact v4
-      #         mặc định không cho phép ghi đè artifact cùng tên).
       - name: Tải artifact kết quả chính
         uses: actions/upload-artifact@v4
         with:
@@ -369,7 +413,6 @@ jobs:
     timeout-minutes: 2
     permissions:
       issues: write
-    # FIX 4: Opt-in Node.js 24 — bắt buộc trước 2/6/2026
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -401,8 +444,6 @@ jobs:
     name: Gửi thông báo thất bại
     runs-on: ubuntu-latest
     needs: [get-pack-info, convert-pack, post-result]
-    # FIX 1 (tiếp): Guard tránh kích hoạt nhầm khi tất cả job bị skip
-    #               do issue đã đóng (labeled event chạy sau opened).
     if: |
       always() &&
       contains(github.event.issue.labels.*.name, 'conversion') &&
@@ -415,7 +456,6 @@ jobs:
     timeout-minutes: 2
     permissions:
       issues: write
-    # FIX 4: Opt-in Node.js 24 — bắt buộc trước 2/6/2026
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
