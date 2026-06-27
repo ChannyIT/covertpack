@@ -1,3 +1,20 @@
+"""
+blocks_util.py  –  Bedrock block-conversion helpers
+Fixed:
+  1. create_terrain_texture: crashed with FileNotFoundError when file didn't
+     exist yet (opened with "r" before any init). Now initialises the atlas
+     on first call and does a safe read/merge on subsequent calls.
+  2. write_terrain_texture: new init helper called by blocks.py before the
+     first conversion so the file always exists when create_terrain_texture
+     is called.
+  3. get_am_file: improved glob to also search flat (non-namespaced)
+     attachable directories and with/without the "block/" sub-path, so
+     modded-namespace block models are actually found.
+  4. regsister_block (typo alias): kept for backwards-compat.
+"""
+
+from __future__ import annotations
+
 import glob
 import json
 import os
@@ -5,11 +22,16 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
+# ──────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────
+
 def _split_model(model: str) -> Tuple[str, str]:
+    """Return (namespace, path) from a model ref like 'ns:block/foo'."""
     model = model.strip()
     if ":" in model:
         namespace, path = model.split(":", 1)
-        return namespace, path
+        return namespace.strip() or "minecraft", path.strip()
     return "minecraft", model
 
 
@@ -18,15 +40,68 @@ def _mapping_file(namespace: str, block: str) -> Path:
     return Path(f"staging/target/geyser_block_{safe_ns}_{block}_mappings.json")
 
 
-def get_am_file(model: str) -> Optional[str]:
-    namespace, path = _split_model(model)
-    files = glob.glob(f"staging/target/rp/attachables/{namespace}/{path}*.json")
-    base_name = Path(path).name
-    for file_path in files:
-        if f"{base_name}." in file_path:
-            return file_path
-    return None
+# ──────────────────────────────────────────────
+# Terrain-texture atlas
+# ──────────────────────────────────────────────
 
+_TERRAIN_TEXTURE_PATH = Path("staging/target/rp/textures/terrain_texture.json")
+
+_TERRAIN_ATLAS_TEMPLATE = {
+    "resource_pack_name": "geyser_custom",
+    "texture_name": "atlas.terrain",
+    "texture_data": {},
+}
+
+
+def write_terrain_texture() -> None:
+    """Create (or leave intact) the terrain_texture atlas so it is always
+    readable when create_terrain_texture() is first called.  Must be called
+    once at the start of block conversion (blocks.py → run())."""
+    if _TERRAIN_TEXTURE_PATH.exists():
+        # Validate it is readable JSON; reset if corrupt.
+        try:
+            data = json.loads(_TERRAIN_TEXTURE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("texture_data"), dict):
+                return
+        except Exception:
+            pass
+    _TERRAIN_TEXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _TERRAIN_TEXTURE_PATH.write_text(
+        json.dumps(_TERRAIN_ATLAS_TEMPLATE, indent=4), encoding="utf-8"
+    )
+
+
+def create_terrain_texture(gmdl: str, texture_file: str) -> str:
+    """Register *texture_file* under key ``block_{gmdl}`` in the terrain atlas.
+
+    BUG FIXED: previously opened the file with ``"r"`` before it was ever
+    created, causing an immediate FileNotFoundError for every block.  Now
+    safely initialises the atlas when missing.
+    """
+    path = _TERRAIN_TEXTURE_PATH
+
+    # Safe read – initialise if missing or corrupt.
+    data: dict = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+
+    if not isinstance(data.get("texture_data"), dict):
+        data = dict(_TERRAIN_ATLAS_TEMPLATE)
+
+    texture_key = f"block_{gmdl}"
+    data["texture_data"][texture_key] = {"textures": texture_file}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    return texture_key
+
+
+# ──────────────────────────────────────────────
+# Animations / geometry writers
+# ──────────────────────────────────────────────
 
 def write_animated_cube() -> None:
     data = {
@@ -34,27 +109,54 @@ def write_animated_cube() -> None:
         "animations": {
             "animation.geo_cube.thirdperson_main_hand": {
                 "loop": True,
-                "bones": {"block": {"rotation": [-20, 145, -10], "position": [0, 14, -6], "scale": [0.375, 0.375, 0.375]}},
+                "bones": {
+                    "block": {
+                        "rotation": [-20, 145, -10],
+                        "position": [0, 14, -6],
+                        "scale": [0.375, 0.375, 0.375],
+                    }
+                },
             },
             "animation.geo_cube.thirdperson_off_hand": {
                 "loop": True,
-                "bones": {"block": {"rotation": [20, 40, 20], "position": [0, 13, -6], "scale": [0.375, 0.375, 0.375]}},
+                "bones": {
+                    "block": {
+                        "rotation": [20, 40, 20],
+                        "position": [0, 13, -6],
+                        "scale": [0.375, 0.375, 0.375],
+                    }
+                },
             },
-            "animation.geo_cube.head": {"loop": True, "bones": {"block": {"position": [0, 19.9, 0], "scale": 0.625}}},
+            "animation.geo_cube.head": {
+                "loop": True,
+                "bones": {"block": {"position": [0, 19.9, 0], "scale": 0.625}},
+            },
             "animation.geo_cube.firstperson_main_hand": {
                 "loop": True,
-                "bones": {"block": {"rotation": [140, 45, 15], "position": [-1, 17, 0], "scale": [0.52, 0.52, 0.52]}},
+                "bones": {
+                    "block": {
+                        "rotation": [140, 45, 15],
+                        "position": [-1, 17, 0],
+                        "scale": [0.52, 0.52, 0.52],
+                    }
+                },
             },
             "animation.geo_cube.firstperson_off_hand": {
                 "loop": True,
-                "bones": {"block": {"rotation": [-5, 45, -5], "position": [-17.5, 17.5, 15], "scale": [0.52, 0.52, 0.52]}},
+                "bones": {
+                    "block": {
+                        "rotation": [-5, 45, -5],
+                        "position": [-17.5, 17.5, 15],
+                        "scale": [0.52, 0.52, 0.52],
+                    }
+                },
             },
         },
     }
     path = Path("staging/target/rp/animations/cube.json")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f)
 
 
 def write_geometry_cube() -> None:
@@ -73,7 +175,10 @@ def write_geometry_cube() -> None:
                 "bones": [
                     {
                         "name": "block",
-                        "binding": "c.item_slot == 'head' ? 'head' : q.item_slot_to_bone_name(c.item_slot)",
+                        "binding": (
+                            "c.item_slot == 'head' ? 'head' :"
+                            " q.item_slot_to_bone_name(c.item_slot)"
+                        ),
                         "pivot": [0, 8, 0],
                         "cubes": [
                             {
@@ -96,9 +201,13 @@ def write_geometry_cube() -> None:
     }
     path = Path("staging/target/rp/models/blocks/cube.json")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f)
 
+
+# ──────────────────────────────────────────────
+# Mapping-file helpers
+# ──────────────────────────────────────────────
 
 def write_mapping_block(block: str, namespace: str = "minecraft") -> None:
     block_key = f"{namespace}:{block}"
@@ -115,11 +224,10 @@ def write_mapping_block(block: str, namespace: str = "minecraft") -> None:
             }
         },
     }
-
     path = _mapping_file(namespace, block)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
 
 
 def register_block(
@@ -135,11 +243,13 @@ def register_block(
     if not path.exists():
         return
 
-    with path.open("r", encoding="utf-8") as file:
-        data = json.load(file)
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
 
     block_key = f"{namespace}:{block}"
-    data.setdefault("blocks", {}).setdefault(block_key, {}).setdefault("state_overrides", {})
+    data.setdefault("blocks", {}).setdefault(block_key, {}).setdefault(
+        "state_overrides", {}
+    )
     data["blocks"][block_key]["state_overrides"][state] = {
         "name": f"block_{gmdl}",
         "display_name": f"block_{gmdl}",
@@ -154,41 +264,88 @@ def register_block(
         },
     }
 
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
 
 
-def regsister_block(block: str, gmdl: str, state: str, texture: str, block_material: str, geometry: str) -> None:
-    register_block(block, gmdl, state, texture, block_material, geometry, namespace="minecraft")
+# Backwards-compat alias (typo in original, kept intentionally)
+def regsister_block(
+    block: str,
+    gmdl: str,
+    state: str,
+    texture: str,
+    block_material: str,
+    geometry: str,
+) -> None:
+    register_block(block, gmdl, state, texture, block_material, geometry)
 
 
-def create_terrain_texture(gmdl: str, texture_file: str) -> str:
-    path = Path("staging/target/rp/textures/terrain_texture.json")
-    with path.open("r", encoding="utf-8") as file:
-        data = json.load(file)
+# ──────────────────────────────────────────────
+# Attachable / geometry lookups
+# ──────────────────────────────────────────────
 
-    texture_key = f"block_{gmdl}"
-    data.setdefault("texture_data", {})[texture_key] = {"textures": texture_file}
+def get_am_file(model: str) -> Optional[str]:
+    """Return path to the Bedrock attachable JSON for *model*.
 
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
-    return texture_key
+    BUG FIXED: original only searched one glob pattern, missing:
+      • Flat (non-sub-dir) attachable layouts
+      • Models stored without the 'block/' prefix component
+      • Models stored under a minecraft/ default namespace folder
+    Now tries several patterns in priority order.
+    """
+    namespace, path = _split_model(model)
+    base_name = Path(path).name  # e.g. "stone"
+
+    # Build candidate search patterns (most-specific first).
+    patterns = [
+        # Exact namespace + full path  (most common for modded blocks)
+        f"staging/target/rp/attachables/{namespace}/{path}.json",
+        f"staging/target/rp/attachables/{namespace}/{path}*.json",
+        # Without the sub-directory component (flat layout)
+        f"staging/target/rp/attachables/{namespace}/{base_name}.json",
+        f"staging/target/rp/attachables/{namespace}/{base_name}*.json",
+        # Fallback: search any namespace (handles minecraft→custom remapping)
+        f"staging/target/rp/attachables/*/{path}.json",
+        f"staging/target/rp/attachables/*/{base_name}.json",
+        # Flat root (no namespace dir)
+        f"staging/target/rp/attachables/{path}.json",
+        f"staging/target/rp/attachables/{base_name}.json",
+    ]
+
+    seen: set = set()
+    for pattern in patterns:
+        for file_path in glob.glob(pattern):
+            if file_path in seen:
+                continue
+            seen.add(file_path)
+            # Confirm the file's base name actually matches (avoid partial hits)
+            file_stem = Path(file_path).stem
+            if file_stem == base_name or file_stem.startswith(base_name + "."):
+                return file_path
+    return None
 
 
 def get_geometry_block(model: str) -> str:
     namespace, path = _split_model(model)
-    matches = glob.glob(f"staging/target/rp/models/blocks/{namespace}/{path}.json")
-    if not matches:
-        return "geometry.cube"
 
-    geometry_file = matches[0]
-    try:
-        with open(geometry_file, "r", encoding="utf-8") as file:
-            raw = file.read()
-        if not raw.strip():
-            os.remove(geometry_file)
-            return "geometry.cube"
-        data = json.loads(raw)
-        return data["minecraft:geometry"][0]["description"]["identifier"]
-    except Exception:
-        return "geometry.cube"
+    patterns = [
+        f"staging/target/rp/models/blocks/{namespace}/{path}.json",
+        f"staging/target/rp/models/blocks/{Path(path).name}.json",
+    ]
+
+    for pattern in patterns:
+        matches = glob.glob(pattern)
+        if not matches:
+            continue
+        geometry_file = matches[0]
+        try:
+            raw = Path(geometry_file).read_text(encoding="utf-8")
+            if not raw.strip():
+                os.remove(geometry_file)
+                continue
+            data = json.loads(raw)
+            return data["minecraft:geometry"][0]["description"]["identifier"]
+        except Exception:
+            continue
+
+    return "geometry.cube"
