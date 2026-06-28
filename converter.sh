@@ -297,6 +297,21 @@ is_url () {
   [[ "${1}" =~ ^https?:// ]]
 }
 
+# checks whether the decompressed pack actually contains any custom item data,
+# supporting BOTH the legacy override format and the modern (1.21.4+) component format.
+# usage: pack_has_processable_items
+pack_has_processable_items () {
+  # Classic Java RP format: assets/<namespace>/models/item/*.json with an "overrides" array
+  if find ./assets -path '*/models/item/*.json' 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  # Modern 1.21.4+ component-based item definition format: assets/<namespace>/items/*.json
+  if find ./assets -path '*/items/*.json' 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  return 1
+}
+
 download_pack () {
   local source_url="${1}"
   local output_file="${2}"
@@ -475,10 +490,15 @@ else
   status_message critical "sg.py not found near converter.sh; skipping automatic script mapping generation"
 fi
 
-# ensure the directory that would contain predicate definitions exists
-if test -d "./assets/minecraft/models/item"
+# ensure the pack actually contains custom item definitions (legacy override format OR
+# modern 1.21.4+ component format) before treating it as having no custom content.
+# NOTE: this used to only check for "./assets/minecraft/models/item", which wrongly treated
+# packs that exclusively use the newer "assets/<namespace>/items/*.json" format as empty,
+# routing them into the disabled placeholder pack below and skipping ALL real conversion
+# (models, textures, fonts, sounds, Geyser mappings, etc.)
+if pack_has_processable_items
 then 
-  status_message completion "Minecraft namespace item folder found."
+  status_message completion "Custom item model/definition files found in pack."
 else
   # create our initial directories for bp & rp
   status_message process "Generating initial directory strucutre for our bedrock packs"
@@ -689,44 +709,29 @@ if contains(":") then sub("\\:(.+)"; "") else "minecraft" end
 ' $(find ./assets -path '*/models/item/*.json' 2>/dev/null | LC_ALL=C sort) > config.json || { status_message error "Invalid JSON exists in block or item folder! See above log."; exit 1; }
 status_message completion "Initial predicate config generated"
 
-# FIX: Support 1.21.4+ item definition format (assets/*/items/*.json)
-# These use minecraft:custom_model_data component instead of overrides predicates
+# Support 1.21.4+ item definition format (assets/*/items/*.json), which uses a recursive
+# "model" tree (minecraft:select / minecraft:range_dispatch / minecraft:condition / ...)
+# instead of the legacy flat "overrides" predicate array.
+#
+# NOTE: this used to be an inline jq script here that checked a top-level ".components"
+# field (which these files do not have -- they have "model") and assumed the referenced
+# model always lived at "models/item/<item-id>.json". Both were wrong, so it silently
+# produced zero usable entries for real packs, which in turn starved the whole downstream
+# 3D-model + texture-atlas pipeline (driven entirely by config.json) of any items to
+# process. itemdefs_modern.py fixes this by reusing sg.py's already-correct, fully
+# recursive model-tree walker instead of re-deriving the same parsing a second time in jq.
 item_def_files=$(find ./assets -path '*/items/*.json' 2>/dev/null | LC_ALL=C sort)
 if [[ -n "${item_def_files}" ]]; then
   status_message process "Processing 1.21.4+ item definition files"
-  jq --slurpfile item_texture scratch_files/item_texture.json --slurpfile item_mappings scratch_files/item_mappings.json -n '
-  def maxdur($input):
-    ($item_mappings[] |
-    [to_entries | map(.key as $key | .value | .java_identifer = $key) | .[] | select(.max_damage)]
-    | map({(.java_identifer | split(":") | .[1]): (.max_damage)})
-    | add
-    | .[$input] // 1)
-  ;
-  def bedrocktexture($input):
-    ($item_texture[] | .[$input] // {"icon": "camera", "frame": 0})
-  ;
-  def namespace:
-    if contains(":") then sub("\:(.+)"; "") else "minecraft" end
-  ;
-  [inputs |
-    . as $def |
-    (input_filename | sub("(.+)/(?<item>[^/]+)\.json$"; .item)) as $item_name |
-    (input_filename | sub("(.+)/assets/(?<ns>[^/]+)/.*"; .ns)) as $item_ns |
-    ($def | .components // {} | ."minecraft:custom_model_data" // ."minecraft:item_model") |
-    if . then
-      {
-        "item": $item_name,
-        "bedrock_icon": bedrocktexture($item_name),
-        "nbt": {"CustomModelData": (if type == "object" then .strings[0] // .floats[0] else . end)},
-        "path": ("./assets/" + $item_ns + "/models/item/" + $item_name + ".json"),
-        "namespace": $item_ns,
-        "model_path": "item",
-        "model_name": $item_name,
-        "generated": false
-      }
-    else empty end
-  ] | to_entries | map(.value.geyserID = "gmdl_ext_\(1+.key)" | .value) | INDEX(.geyserID)
-  ' ${item_def_files} 2>/dev/null > scratch_files/item_defs_extra.json || true
+  itemdefs_script="$(resolve_aux_script itemdefs_modern.py)"
+  if [[ -n "${itemdefs_script}" ]]; then
+    if ! python "${itemdefs_script}" . > scratch_files/item_defs_extra.json 2> scratch_files/item_defs_modern.log; then
+      status_message critical "itemdefs_modern.py failed; see scratch_files/item_defs_modern.log -- continuing without 1.21.4+ item definitions"
+      : > scratch_files/item_defs_extra.json
+    fi
+  else
+    status_message critical "itemdefs_modern.py not found near converter.sh; skipping 1.21.4+ item definitions"
+  fi
   if [[ -s scratch_files/item_defs_extra.json ]]; then
     jq -s '.[0] * .[1]' config.json scratch_files/item_defs_extra.json | sponge config.json
     status_message completion "1.21.4+ item definitions merged into config"
@@ -1022,18 +1027,51 @@ do
     do
       if [[ ${elements} = null ]]
       then
-        local elements="$(jq -rc '.elements' ${parental} 2> /dev/null | tee scratch_files/${gid}.elements.temp || (echo && echo null))"
+        # FIX: `jq ... | tee file || fallback` is broken — a pipeline's exit
+        # status reflects the LAST command (tee, which always succeeds), not
+        # jq. So if the parent file was missing/unreadable, the `||` never
+        # fired and the temp file was silently left EMPTY (0 bytes) instead
+        # of "null". An empty file later made --slurpfile yield zero values,
+        # which made the whole model object construction yield NOTHING,
+        # truncating the model to an empty file. This is why models with a
+        # broken/missing link anywhere in a multi-level parent chain
+        # (common in complex multi-element block/item models) silently
+        # converted to nothing instead of failing loudly or falling back.
+        local _elements_raw
+        if _elements_raw="$(jq -rc '.elements' ${parental} 2> /dev/null)"; then
+          local elements="${_elements_raw:-null}"
+        else
+          local elements="null"
+        fi
+        printf '%s\n' "${elements}" > scratch_files/${gid}.elements.temp
         local element_parent=${parental}
       fi
       if [[ ${textures} = null ]]
       then
-        local textures="$(jq -rc '.textures' ${parental} 2> /dev/null | tee scratch_files/${gid}.textures.temp || (echo && echo null))"
+        local _textures_raw
+        if _textures_raw="$(jq -rc '.textures' ${parental} 2> /dev/null)"; then
+          local textures="${_textures_raw:-null}"
+        else
+          local textures="null"
+        fi
+        printf '%s\n' "${textures}" > scratch_files/${gid}.textures.temp
       fi
       if [[ ${display} = null ]]
       then
-        local display="$(jq -rc '.display' ${parental} 2> /dev/null | tee scratch_files/${gid}.display.temp || (echo && echo null))"
+        local _display_raw
+        if _display_raw="$(jq -rc '.display' ${parental} 2> /dev/null)"; then
+          local display="${_display_raw:-null}"
+        else
+          local display="null"
+        fi
+        printf '%s\n' "${display}" > scratch_files/${gid}.display.temp
       fi
-      local parental="$(jq -rc 'def namespace: if contains(":") then sub("\\:(.+)"; "") else "minecraft" end; ("./assets/" + (.parent? | namespace) + "/models/" + ((.parent? // empty) | sub("(.*?)\\:"; "")) + ".json") // "null"' ${parental} 2> /dev/null || (echo && echo null))"
+      local _parental_raw
+      if _parental_raw="$(jq -rc 'def namespace: if contains(":") then sub("\\:(.+)"; "") else "minecraft" end; ("./assets/" + (.parent? | namespace) + "/models/" + ((.parent? // empty) | sub("(.*?)\\:"; "")) + ".json") // "null"' ${parental} 2> /dev/null)"; then
+        local parental="${_parental_raw:-null}"
+      else
+        local parental="null"
+      fi
       local texture_0="$(jq -rc 'def namespace: if contains(":") then sub("\\:(.+)"; "") else "minecraft" end; ("./assets/" + ([.[]][0]? | namespace) + "/textures/" + (([.[]][0]? // empty) | sub("(.*?)\\:"; "")) + ".png") // "null"' scratch_files/${gid}.textures.temp)"
     done
 
@@ -1215,10 +1253,28 @@ do
           def uv_calc($input):
             (if (.faces | .[$input]) then
             (.faces | .[$input].texture) as $input_n
-            | ( (((((.faces | .[$input].uv[0]) * (texturedata($input_n) | .frame.w) * 0.0625) + (texturedata($input_n) | .frame.x)) * (16 / ($atlas[] | .meta.size.w))) ) ) as $fn0
-            | ( (((((.faces | .[$input].uv[1]) * (texturedata($input_n) | .frame.h) * 0.0625) + (texturedata($input_n) | .frame.y)) * (16 / ($atlas[] | .meta.size.h))) ) ) as $fn1
-            | ( (((((.faces | .[$input].uv[2]) * (texturedata($input_n) | .frame.w) * 0.0625) + (texturedata($input_n) | .frame.x)) * (16 / ($atlas[] | .meta.size.w))) ) ) as $fn2
-            | ( (((((.faces | .[$input].uv[3]) * (texturedata($input_n) | .frame.h) * 0.0625) + (texturedata($input_n) | .frame.y)) * (16 / ($atlas[] | .meta.size.h))) ) ) as $fn3 
+            # FIX: "uv" is optional per Java model spec — when a face omits it,
+            # Minecraft auto-derives the UV rectangle from the element from/to
+            # coordinates directly. The old code did `.uv[0] * number`, and
+            # indexing a missing "uv" gives jq `null`, so `null * number`
+            # threw a jq error that aborted conversion for the ENTIRE model
+            # (truncating it to empty via sponge) — this is why any model
+            # with several elements (the more elements, the more likely one
+            # face somewhere has no explicit uv) silently failed to convert.
+            | ((.faces | .[$input].uv) // (
+              (.from[0]) as $ex1 | (.from[1]) as $ey1 | (.from[2]) as $ez1 |
+              (.to[0]) as $ex2 | (.to[1]) as $ey2 | (.to[2]) as $ez2 |
+              if ($input == "down" or $input == "up") then [$ex1, $ez1, $ex2, $ez2]
+              elif $input == "north" then [(16 - $ex2), (16 - $ey2), (16 - $ex1), (16 - $ey1)]
+              elif $input == "south" then [$ex1, (16 - $ey2), $ex2, (16 - $ey1)]
+              elif $input == "west" then [$ez1, (16 - $ey2), $ez2, (16 - $ey1)]
+              elif $input == "east" then [(16 - $ez2), (16 - $ey2), (16 - $ez1), (16 - $ey1)]
+              else [0, 0, 16, 16] end
+            )) as $uv4
+            | ( (((($uv4[0]) * (texturedata($input_n) | .frame.w) * 0.0625) + (texturedata($input_n) | .frame.x)) * (16 / ($atlas[] | .meta.size.w))) ) as $fn0
+            | ( (((($uv4[1]) * (texturedata($input_n) | .frame.h) * 0.0625) + (texturedata($input_n) | .frame.y)) * (16 / ($atlas[] | .meta.size.h))) ) as $fn1
+            | ( (((($uv4[2]) * (texturedata($input_n) | .frame.w) * 0.0625) + (texturedata($input_n) | .frame.x)) * (16 / ($atlas[] | .meta.size.w))) ) as $fn2
+            | ( (((($uv4[3]) * (texturedata($input_n) | .frame.h) * 0.0625) + (texturedata($input_n) | .frame.y)) * (16 / ($atlas[] | .meta.size.h))) ) as $fn3 
             | (($fn2 - $fn0) as $num | [([-1, $num] | max), 1] | min) as $x_sign
             | (($fn3 - $fn1) as $num | [([-1, $num] | max), 1] | min) as $y_sign |
             (if ($input == "up" or $input == "down") then {
