@@ -129,13 +129,27 @@ def main() -> None:
                         allow_custom_registry=allow_custom_registry and ns != "minecraft",
                     )
                 )
-                if not key_is_runtime_java_item:
-                    # Geyser item mappings can only re-skin a real Java item id; a
-                    # custom-namespaced item with no allow-listed registry id has
-                    # nothing meaningful to attach a Bedrock 3D model to here.
-                    continue
+                # BUG FIX: Do NOT skip custom-namespace items.
+                #
+                # The previous code dropped ALL non-vanilla items (harshlands:*, baubles:*,
+                # iceandfire:*, spartanweaponry:*, etc.) because _is_known_java_item_key()
+                # only recognises vanilla Minecraft item IDs.  For GeyserMC modded-server
+                # packs these custom items are the ONLY items in the pack, so skipping them
+                # left config.json empty, which caused converter.sh's convert_model() to
+                # never run and therefore generated ZERO Bedrock attachable/geometry files.
+                #
+                # GeyserMC format_version:2 supports arbitrary Java item IDs as mapping keys
+                # (e.g. "harshlands:some_sword": [...]), so including them here is correct.
+                # We therefore allow all items through; the effective item key used in
+                # config.json is the full namespaced id for custom items.
 
-                java_item_id = (canonical_key or key).split(":")[-1]
+                # Effective Java item id used in config / geyser mappings
+                if key_is_runtime_java_item:
+                    java_item_id = (canonical_key or key).split(":")[-1]
+                else:
+                    # Custom namespace item – use the full namespaced id so GeyserMC
+                    # format_version:2 mappings can address it correctly.
+                    java_item_id = key  # e.g. "harshlands:baubles/amulet_slot"
 
                 entries: list = []
                 sg.walk_tree(model_node, item_id, res, reader, sg._Ctx(), 0, entries, item_ns=ns)
@@ -153,9 +167,17 @@ def main() -> None:
                     if e.get("unbreakable") is True:
                         nbt["Unbreakable"] = True
                     if not nbt:
-                        # No predicate at all (bare default appearance) -- the legacy
-                        # override scan never handles these either, skip for parity.
-                        continue
+                        # BUG FIX: Do NOT skip predicate-less entries for custom-namespace
+                        # items.  Vanilla items share thousands of items so a predicate is
+                        # needed to distinguish variants.  Custom mod items (harshlands:*,
+                        # baubles:*, etc.) each have a unique Java item ID, so a single
+                        # no-predicate mapping is correct and necessary — GeyserMC will
+                        # apply that mapping to ALL instances of that Java item ID.
+                        if key_is_runtime_java_item:
+                            # Vanilla item: skip bare/no-predicate entries for parity with
+                            # legacy override scan.
+                            continue
+                        # Custom namespace item: include even with no predicates.
 
                     m_ns, m_path = sg.split_ns(java_model)
                     model_parts = m_path.split("/")
