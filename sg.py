@@ -3321,6 +3321,7 @@ def generate(pack_path: str) -> Dict[str, List[Dict]]:
                         added = 1
 
                 if key_is_runtime_java_item:
+                    # Vanilla Java item with predicates – standard GeyserMC CMD override path.
                     runtime_entries = [
                         entry
                         for entry in target_entries
@@ -3329,6 +3330,29 @@ def generate(pack_path: str) -> Dict[str, List[Dict]]:
                     if runtime_entries:
                         raw[canonical_key or key].extend(runtime_entries)
                         new_count += len(runtime_entries)
+                else:
+                    # BUG FIX: Custom/modded-namespace item (e.g. harshlands:*, baubles:*,
+                    # iceandfire:*, spartanweaponry:*, etc.).
+                    #
+                    # The previous code silently dropped ALL of these because
+                    # _is_known_java_item_key() only recognises vanilla Minecraft item IDs.
+                    # That caused sprites.json to be empty for server packs that use ONLY
+                    # custom-namespace items (like GeyserMC modded-server setups), which in
+                    # turn starved the entire downstream 3D-model pipeline in converter.sh
+                    # (config.json stays empty → convert_model() never runs → zero Bedrock
+                    # attachables generated → no 3D items in the RP at all).
+                    #
+                    # GeyserMC format_version:2 mappings support arbitrary Java item IDs as
+                    # keys (e.g. "harshlands:some_item": [...]), so including these entries
+                    # here is both safe and necessary for modded-server packs.
+                    #
+                    # We always include custom-namespace entries regardless of the
+                    # GEYSER_ALLOW_CUSTOM_JAVA_ITEMS env-var because modded packs *need*
+                    # them; the env-var was only meant to gate vanilla-like custom registry
+                    # items, not fully custom mod items.
+                    if target_entries:
+                        raw[key].extend(target_entries)
+                        new_count += len(target_entries)
             _info(f'New-format entries: {new_count}')
 
         embedded = _extract_embedded_mapping(reader, res)
