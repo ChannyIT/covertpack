@@ -902,35 +902,41 @@ def _variant_score(variant: Dict[str, Any]) -> int:
 
 
 def _write_bedrock_font_definition(buckets) -> None:
-    """Write Bedrock font/default.json referencing all glyph sprite sheets."""
-    OUTPUT_FONT_DIR.mkdir(parents=True, exist_ok=True)
-    glyph_pages = {}
-    for bucket in buckets:
-        # bucket is like "00", "E0" etc. - map to int page index
-        try:
-            page_index = int(bucket, 16) if len(bucket) == 2 else int(bucket)
-        except Exception:
-            page_index = 0
-        glyph_pages[page_index] = f"textures/font/glyph_{bucket}"
+    """[DISABLED] Previously wrote a broken font/default.json — now a no-op.
 
-    data = {
-        "type": "trueTypeFont",
-        "path": "font/NotoSansUI-Regular.ttf",
-        "size": 11.0,
-        "blur": 0,
-        "shadow": False,
-        "default": {
-            "glyphPages": glyph_pages,
-            "glyphSizes": "font/glyph_sizes.bin",
-        },
-    }
+    BUG FIX — two problems with the old implementation:
 
-    # Write the Bedrock font definition
-    out_path = OUTPUT_FONT_DIR / "default.json"
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    1.  WRONG FORMAT: The old code wrote:
+            { "type": "trueTypeFont", "path": "font/NotoSansUI-Regular.ttf", ... }
+        That key ("type") and that TTF path do not exist in Bedrock's font system.
+        Bedrock's real font/default.json uses a completely different schema (it only
+        names the built-in TTF to use for Latin/CJK text, e.g. Roboto).  Providing
+        an invalid font/default.json causes the Bedrock engine to reject or ignore
+        the whole font module, breaking ALL text rendering in the pack.
 
-    _log(f"Wrote Bedrock font definition with {len(glyph_pages)} glyph page(s)")
+    2.  WRONG GLYPH PAGE PATHS: The old code referenced glyph pages as:
+            "textures/font/glyph_E0"
+        but the actual files are written to (and must be referenced from):
+            "font/glyph_E0"
+        So even if the format were corrected, the paths would still be wrong.
+
+    FIX: Do NOT write font/default.json at all.
+
+    Bedrock automatically discovers and loads glyph sprite-sheet files placed
+    directly in the font/ directory of the resource pack (e.g. font/glyph_E0.png,
+    font/glyph_00.png).  The glyph_sizes.bin written by _write_bedrock_glyph_sizes()
+    is also auto-loaded from that same folder.  No font/default.json is required —
+    and an incorrect one actively breaks the font system.
+
+    If you ever need a legitimate font/default.json (e.g. to swap the TTF face used
+    for body text), write it with the correct Bedrock schema separately; do not mix
+    it with glyph-page declarations.
+    """
+    _log(
+        f"Skipping font/default.json generation for {len(list(buckets))} bucket(s) "
+        "(disabled — a wrong font/default.json breaks all Bedrock text rendering; "
+        "glyph PNGs + glyph_sizes.bin are auto-loaded by the engine without it)"
+    )
 
 
 def run() -> None:
@@ -1298,8 +1304,16 @@ def run() -> None:
 
     bedrock_font_assets = _write_bedrock_glyph_sizes(glyph_map)
 
-    # FIX: Write Bedrock font/default.json that references our glyph sheets
+    # Write glyph bucket sprite sheets (this is correct and must stay)
+    # _write_bedrock_font_definition is now a no-op — see its docstring for details.
     _write_bedrock_font_definition(sorted(bucket_tiles.keys()))
+
+    # Ensure any stale font/default.json from previous runs is removed so it
+    # cannot interfere with Bedrock's built-in font resolution.
+    stale_font_def = OUTPUT_FONT_DIR / "default.json"
+    if stale_font_def.exists():
+        stale_font_def.unlink()
+        _log("Removed stale font/default.json (would have broken all Bedrock text rendering)")
 
     OUTPUT_MAPPING_FILE.parent.mkdir(parents=True, exist_ok=True)
     missing_ref_count = (
