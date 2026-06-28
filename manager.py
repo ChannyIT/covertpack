@@ -132,6 +132,9 @@ def _copy_if_better(source: Path, destination: Path) -> None:
 
 
 def _clear_generated_mapping_state() -> None:
+    # NOTE: TARGET_DIR / "geyser_mappings.json" is intentionally NOT cleared here.
+    # That file is the OUTPUT of converter.sh's main 3D-item conversion and must be
+    # preserved so that Python hooks can extend it, not replace it.
     for path in (
         STAGING_DIR / "script.json",
         STAGING_DIR / "sprites.json",
@@ -141,7 +144,6 @@ def _clear_generated_mapping_state() -> None:
         TARGET_DIR / "script.json",
         TARGET_DIR / "sprites.json",
         TARGET_DIR / "resolved_sprites.json",
-        TARGET_DIR / "geyser_mappings.json",
     ):
         try:
             if path.exists():
@@ -167,12 +169,14 @@ def _sync_script_mapping_from_workspace() -> None:
     target_mapping = TARGET_DIR / "geyser_mappings.json"
     source_v2_mapping = STAGING_DIR / "geyser_mappings_v2.json"
     source_v1_mapping = STAGING_DIR / "geyser_mappings.json"
-    if source_v2_mapping.exists():
-        target_mapping.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_v2_mapping, target_mapping)
-    elif source_v1_mapping.exists():
-        target_mapping.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_v1_mapping, target_mapping)
+    # Only write to target if it doesn't already have content from the main conversion.
+    if not _mapping_file_has_content(target_mapping):
+        if source_v2_mapping.exists():
+            target_mapping.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_v2_mapping, target_mapping)
+        elif source_v1_mapping.exists():
+            target_mapping.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_v1_mapping, target_mapping)
 
 
 def _prepare_pack_workspace() -> bool:
@@ -297,12 +301,14 @@ def _ensure_script_mapping() -> None:
     target_mapping = TARGET_DIR / "geyser_mappings.json"
     source_v2_mapping = STAGING_DIR / "geyser_mappings_v2.json"
     source_v1_mapping = STAGING_DIR / "geyser_mappings.json"
-    if source_v2_mapping.exists():
-        target_mapping.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_v2_mapping, target_mapping)
-    elif source_v1_mapping.exists():
-        target_mapping.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_v1_mapping, target_mapping)
+    # Only write to target if it doesn't already have content from the main conversion.
+    if not _mapping_file_has_content(target_mapping):
+        if source_v2_mapping.exists():
+            target_mapping.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_v2_mapping, target_mapping)
+        elif source_v1_mapping.exists():
+            target_mapping.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_v1_mapping, target_mapping)
 
 
 def _pack_index(limit: int = 20000) -> List[str]:
