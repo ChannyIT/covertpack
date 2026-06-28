@@ -811,21 +811,40 @@ def _space_codepoints_from_key(raw_char: Any) -> List[int]:
 
 
 def _write_bucket_sheet(bucket: str, tiles: Dict[int, Image.Image], cell_w: int, cell_h: int) -> None:
+    """Write a 256×256 glyph page PNG for Bedrock.
+
+    BUG FIX: Bedrock requires ALL glyph page PNGs to be exactly 256×256 pixels
+    (a 16×16 grid where each cell is 16×16 pixels).  The original code used the
+    Java font provider's height/width as the cell size, which produced pages like
+    4096×4096 (for height=300 providers) that crash or fail to load on mobile
+    devices, or 512×1024 pages that Bedrock simply ignores.
+
+    Fix: Always output 256×256 pages.  Each source tile is scaled down (or up)
+    to fit a 16×16 cell using LANCZOS resampling so the icon is still recognisable
+    at the smaller size.  Custom characters used as HUD overlays (height=300 etc.)
+    will be proportionally small when rendered via the action bar, which is
+    consistent with how they appear in Java after scaling by the font size.
+    """
+    BEDROCK_CELL = 16       # Bedrock canonical glyph cell width AND height
+    BEDROCK_PAGE = 256      # = BEDROCK_CELL * 16 columns = 16 rows
+
     OUTPUT_FONT_DIR.mkdir(parents=True, exist_ok=True)
-    sheet = Image.new("RGBA", (cell_w * 16, cell_h * 16), (0, 0, 0, 0))
+    sheet = Image.new("RGBA", (BEDROCK_PAGE, BEDROCK_PAGE), (0, 0, 0, 0))
 
     for slot in range(256):
         tile = tiles.get(slot)
         if tile is None:
-            tile = Image.new("RGBA", (cell_w, cell_h), (0, 0, 0, 0))
-        if tile.size != (cell_w, cell_h):
-            normalized = Image.new("RGBA", (cell_w, cell_h), (0, 0, 0, 0))
-            offset = ((cell_w - tile.width) // 2, (cell_h - tile.height) // 2)
-            normalized.paste(tile, offset)
-            tile = normalized
+            tile = Image.new("RGBA", (BEDROCK_CELL, BEDROCK_CELL), (0, 0, 0, 0))
+        else:
+            # Scale the tile to fit exactly within the 16×16 Bedrock cell.
+            # Use LANCZOS (high-quality downscaling) for large tiles,
+            # NEAREST for tiles that are already ≤ 16×16 (pixel-art accuracy).
+            if tile.width != BEDROCK_CELL or tile.height != BEDROCK_CELL:
+                resample = Image.LANCZOS if (tile.width > BEDROCK_CELL or tile.height > BEDROCK_CELL) else Image.NEAREST
+                tile = tile.resize((BEDROCK_CELL, BEDROCK_CELL), resample)
 
-        x = (slot % 16) * cell_w
-        y = (slot // 16) * cell_h
+        x = (slot % 16) * BEDROCK_CELL
+        y = (slot // 16) * BEDROCK_CELL
         sheet.paste(tile, (x, y))
 
     output = OUTPUT_FONT_DIR / f"glyph_{bucket}.png"
