@@ -1482,31 +1482,179 @@ def _ensure_item_state_controllers() -> Dict[str, Any]:
 
 
 def _ensure_gui_hud_placeholder() -> Dict[str, Any]:
-    gui_textures = list(TARGET_RP_DIR.glob("textures/gui/**/*"))
-    if not any(path.is_file() and path.suffix.lower() in TEXTURE_EXTENSIONS for path in gui_textures):
-        return {"hud_screen_files": 0}
-    ui_dir = TARGET_RP_DIR / "ui"
-    ui_dir.mkdir(parents=True, exist_ok=True)
-    hud_path = ui_dir / "hud_screen.json"
-    if hud_path.exists():
-        return {"hud_screen_files": 0}
-    payload = {
-        "namespace": "hud",
-        "root_panel": {
-            "type": "panel",
-            "controls": [
-                {
-                    "geyser_custom_java_gui_limitations@common.empty_panel": {
-                        "size": [0, 0],
-                        "visible": False,
-                    }
-                }
-            ],
-        },
-        "$conversion_note": "Java GUI textures are copied under textures/gui; Bedrock screen JSON cannot reproduce arbitrary Java GUI layout pixel-for-pixel.",
-    }
-    _write_json(hud_path, payload)
-    return {"hud_screen_files": 1}
+    # BUG FIX: Do NOT write a custom ui/hud_screen.json.
+    #
+    # Writing ANY hud_screen.json without declaring ALL vanilla HUD controls
+    # (health bar, hunger bar, armor bar, hotbar, XP bar, etc.) completely
+    # replaces Bedrock's built-in HUD with whatever controls are listed.
+    # The previous implementation wrote an almost-empty panel which caused
+    # the hunger bar, armor bar, and hotbar to become invisible in MC PE.
+    #
+    # Java GUI textures are still copied to textures/gui/ for direct texture
+    # replacement (e.g., textures/gui/minecraft/gui/icons.png).  That works
+    # fine without overriding the UI JSON.  Removing hud_screen.json lets
+    # Bedrock use its own default HUD layout with our custom textures applied.
+    #
+    # If you need to add truly custom HUD overlays in the future, write a
+    # hud_screen.json that EXTENDS the vanilla namespace and only adds new
+    # controls — never remove or replace existing vanilla control bindings.
+
+    # Cleanup: remove any stale hud_screen.json left over from a previous run
+    # so it doesn't silently re-break the HUD on the next conversion.
+    stale_hud = TARGET_RP_DIR / "ui" / "hud_screen.json"
+    if stale_hud.exists():
+        stale_hud.unlink()
+        _log("Removed stale ui/hud_screen.json (was hiding Bedrock HUD elements)")
+        ui_dir = TARGET_RP_DIR / "ui"
+        try:
+            if ui_dir.is_dir() and not any(ui_dir.iterdir()):
+                ui_dir.rmdir()
+        except OSError:
+            pass
+
+    return {"hud_screen_files": 0}
+
+
+def _shorten_long_paths() -> Dict[str, Any]:
+    """Rename files whose RP-relative paths are >= 80 chars to stay within Bedrock's limit.
+
+    Bedrock (and GeyserMC) emit WARN for every file path that is >= 80 characters.
+    On some Bedrock platforms (console, certain mobile builds) these files fail to
+    load entirely.  This function:
+      1. Finds every file in TARGET_RP_DIR whose relative path length >= 80.
+      2. Derives a shorter path by abbreviating intermediate directory components.
+      3. Moves the file to the new path.
+      4. Scans every *.json / *.lang / *.material file in the pack and replaces
+         all occurrences of the old path (with and without extension) with the
+         new path.
+
+    The abbreviation strategy keeps the first two directory levels intact
+    (e.g. "textures/items") and compresses deeper levels to their first three
+    characters, joined with underscores.  A four-character MD5 suffix is appended
+    to the stem when the filename itself is still too long after shortening dirs.
+    """
+    MAX_LEN = 79  # Bedrock hard limit is 80, so we target <= 79
+
+    # ── 1. Collect files that need renaming ─────────────────────────────────
+    rename_map: Dict[str, str] = {}   # old_rel → new_rel  (POSIX, no leading /)
+
+    for fpath in sorted(TARGET_RP_DIR.rglob("*")):
+        if not fpath.is_file():
+            continue
+        try:
+            rel = fpath.relative_to(TARGET_RP_DIR).as_posix()
+        except ValueError:
+            continue
+        if len(rel) < 80:
+            continue
+
+        parts = rel.split("/")
+        filename = parts[-1]
+        dir_parts = parts[:-1]
+        ext = Path(filename).suffix
+        stem = Path(filename).stem
+
+        # Build short directory prefix
+        if len(dir_parts) <= 2:
+            short_dir = "/".join(dir_parts)
+        else:
+            base = "/".join(dir_parts[:2])
+            abbrev = "_".join(p[:3].rstrip("_-") for p in dir_parts[2:] if p)
+            short_dir = f"{base}/{abbrev}" if abbrev else base
+
+        # Check if filename alone fits
+        max_stem_len = MAX_LEN - len(short_dir) - 1 - len(ext)  # -1 for "/"
+        if max_stem_len < 6:
+            # Extreme case: use pure hash as filename
+            h = hashlib.md5(rel.encode()).hexdigest()[:12]
+            new_filename = h + ext
+        elif len(stem) > max_stem_len:
+            # Truncate stem + 4-char hash to disambiguate
+            h4 = hashlib.md5(rel.encode()).hexdigest()[:4]
+            new_filename = stem[: max(1, max_stem_len - 4)] + h4 + ext
+        else:
+            new_filename = filename
+
+        new_rel = f"{short_dir}/{new_filename}"
+
+        # Guard against collisions from different sources mapping to the same target
+        if new_rel in rename_map.values() and new_rel != rel:
+            h6 = hashlib.md5(rel.encode()).hexdigest()[:6]
+            new_filename = stem[:max(1, MAX_LEN - len(short_dir) - 1 - len(ext) - 6)] + h6 + ext
+            new_rel = f"{short_dir}/{new_filename}"
+
+        if new_rel != rel and len(new_rel) < 80:
+            rename_map[rel] = new_rel
+
+    if not rename_map:
+        return {"path_renames": 0}
+
+    _log(f"Shortening {len(rename_map)} paths that exceed 79 characters")
+
+    # ── 2. Move the files ────────────────────────────────────────────────────
+    for old_rel, new_rel in rename_map.items():
+        old_path = TARGET_RP_DIR / old_rel
+        new_path = TARGET_RP_DIR / new_rel
+        if not old_path.exists():
+            continue
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old_path), str(new_path))
+
+    # Clean up now-empty intermediate directories
+    for old_rel in rename_map:
+        parent = (TARGET_RP_DIR / old_rel).parent
+        for _ in range(5):          # walk up at most 5 levels
+            if parent == TARGET_RP_DIR:
+                break
+            try:
+                if parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+    # ── 3. Patch JSON / lang / material references ───────────────────────────
+    # Build two lookup tables: with-extension and without-extension versions
+    ext_map: Dict[str, str] = {}
+    noext_map: Dict[str, str] = {}
+    for old_rel, new_rel in rename_map.items():
+        ext_map[old_rel] = new_rel
+        # Strip common texture extensions for JSON references like "textures/items/foo"
+        for tex_ext in (".png", ".tga", ".jpg", ".jpeg"):
+            if old_rel.lower().endswith(tex_ext):
+                old_noext = old_rel[: -len(tex_ext)]
+                new_noext = new_rel[: -len(tex_ext)]
+                noext_map[old_noext] = new_noext
+                break
+
+    patchable_suffixes = {".json", ".lang", ".material", ".mcmeta"}
+    patched_files = 0
+
+    for fpath in TARGET_RP_DIR.rglob("*"):
+        if not fpath.is_file():
+            continue
+        if fpath.suffix.lower() not in patchable_suffixes:
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        original = text
+        for old_ref, new_ref in ext_map.items():
+            text = text.replace(old_ref, new_ref)
+        for old_ref, new_ref in noext_map.items():
+            text = text.replace(old_ref, new_ref)
+
+        if text != original:
+            try:
+                fpath.write_text(text, encoding="utf-8")
+                patched_files += 1
+            except Exception:
+                pass
+
+    _log(f"Path shortening done: {len(rename_map)} files renamed, {patched_files} JSON/lang files patched")
+    return {"path_renames": len(rename_map), "path_patch_files": patched_files}
 
 
 def _ensure_displayentity_placeholders() -> Dict[str, Any]:
@@ -1927,6 +2075,8 @@ def run() -> None:
     report.update(_detect_unsupported())
     report.update(_write_conversion_validation())
     report.update(_sanitize_output_files())
+    # Shorten any paths that are >= 80 chars (GeyserMC WARN + some Bedrock platforms reject them)
+    report.update(_shorten_long_paths())
 
     _write_json(REPORT_FILE, report)
     _log(f"Post-processing complete: {REPORT_FILE}")
