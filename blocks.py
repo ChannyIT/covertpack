@@ -468,41 +468,70 @@ def run() -> None:
             model_ref_norm = _normalize_model_ref(model_ref, namespace)
 
             attachable_path = blocks_util.get_am_file(model_ref_norm)
-            if not attachable_path:
-                unresolved_model_refs.add(model_ref)
-                unresolved_sources.add(
-                    blockstate_file.relative_to(PACK_DIR).as_posix()
-                )
-                continue
 
-            try:
-                with open(attachable_path, "r", encoding="utf-8") as f:
-                    attachable_data = json.load(f)
-            except Exception as exc:
-                _log(f"Failed to parse attachable {attachable_path}: {exc}")
-                unresolved_model_refs.add(model_ref)
-                unresolved_sources.add(
-                    blockstate_file.relative_to(PACK_DIR).as_posix()
-                )
-                continue
+            if attachable_path:
+                # ── Path A: attachable exists (item-model pipeline ran first) ──────
+                try:
+                    with open(attachable_path, "r", encoding="utf-8") as f:
+                        attachable_data = json.load(f)
+                except Exception as exc:
+                    _log(f"Failed to parse attachable {attachable_path}: {exc}")
+                    unresolved_model_refs.add(model_ref)
+                    unresolved_sources.add(
+                        blockstate_file.relative_to(PACK_DIR).as_posix()
+                    )
+                    continue
 
-            try:
-                description = attachable_data["minecraft:attachable"]["description"]
-                gmdl = description["identifier"].split(":", 1)[1]
-                texture_ref = description["textures"]["default"]
-            except Exception as exc:
-                _log(f"Missing attachable fields in {attachable_path}: {exc}")
-                unresolved_model_refs.add(model_ref)
-                unresolved_sources.add(
-                    blockstate_file.relative_to(PACK_DIR).as_posix()
-                )
-                continue
+                try:
+                    description = attachable_data["minecraft:attachable"]["description"]
+                    gmdl = description["identifier"].split(":", 1)[1]
+                    texture_ref = description["textures"]["default"]
+                except Exception as exc:
+                    _log(f"Missing attachable fields in {attachable_path}: {exc}")
+                    unresolved_model_refs.add(model_ref)
+                    unresolved_sources.add(
+                        blockstate_file.relative_to(PACK_DIR).as_posix()
+                    )
+                    continue
 
-            geometry = blocks_util.get_geometry_block(model_ref_norm)
-            texture = blocks_util.create_terrain_texture(gmdl, texture_ref)
+                geometry = blocks_util.get_geometry_block(model_ref_norm)
+                texture = blocks_util.create_terrain_texture(gmdl, texture_ref)
 
-            if geometry == "geometry.cube":
-                _patch_attachable_for_cube(attachable_path, attachable_data)
+                if geometry == "geometry.cube":
+                    _patch_attachable_for_cube(attachable_path, attachable_data)
+
+                gmdl_key = gmdl
+                texture_key = texture
+
+            else:
+                # ── Path B: BUG FIX – no attachable found.
+                #
+                # Previously: silently skipped the block (added to unresolved).
+                # Effect: ALL custom-namespace block models were dropped because
+                # the item-model pipeline never ran (due to separate bugs in sg.py
+                # and itemdefs_modern.py that skipped custom-namespace items).
+                #
+                # Fix: directly resolve the block model's primary texture from the
+                # Java pack and register it in terrain_texture.json.  The block is
+                # rendered as a solid cube (geometry.cube), which is correct for
+                # most custom-mod block models that don't use irregular geometry.
+                #
+                # This is a best-effort fallback; it won't produce correct geometry
+                # for non-cube blocks (stairs, slabs, fences, etc.) but is far
+                # better than silently dropping the block entirely.
+                texture_key = blocks_util.resolve_block_texture_direct(model_ref_norm)
+                if not texture_key:
+                    unresolved_model_refs.add(model_ref)
+                    unresolved_sources.add(
+                        blockstate_file.relative_to(PACK_DIR).as_posix()
+                    )
+                    continue
+
+                # Derive a stable gmdl identifier from the model ref
+                gmdl_key = (
+                    f"{namespace}_{Path(model_ref_norm.split(':', 1)[-1]).name}"
+                ).replace("/", "_").replace(":", "_")
+                geometry = "geometry.cube"
 
             # FIX: use robust tripwire normalisation
             final_state_key = state_key
@@ -511,9 +540,9 @@ def run() -> None:
 
             blocks_util.register_block(
                 block_name,
-                gmdl,
+                gmdl_key,
                 final_state_key,
-                texture,
+                texture_key,
                 block_material,
                 geometry,
                 namespace=namespace,
