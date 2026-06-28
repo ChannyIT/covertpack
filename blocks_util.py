@@ -533,6 +533,9 @@ def resolve_block_texture_direct(model_ref: str) -> Optional[str]:
         return None
 
     # ── 5. Register in terrain_texture.json and return key ───────────────────
-    key = f"block_{safe_key}"
-    create_terrain_texture(key, dest_rel)
-    return key
+    # BUG FIX: Do NOT prepend "block_" here — create_terrain_texture() already
+    # adds "block_" internally (texture_key = f"block_{gmdl}").
+    # Passing "block_foo" → create_terrain_texture → key = "block_block_foo" (double!).
+    # Use safe_key directly so the final terrain key is "block_{safe_key}".
+    full_key = create_terrain_texture(safe_key, dest_rel)
+    return full_key
